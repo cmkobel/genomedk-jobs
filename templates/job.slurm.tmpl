@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --account @@ACCOUNT@@
+@@PARTITION_BLOCK@@@@ARRAY_BLOCK@@@@GPU_BLOCK@@#SBATCH -c @@CPUS@@
+#SBATCH --mem @@MEM@@
+#SBATCH --time @@TIME@@
+#SBATCH --job-name @@NAME@@
+#SBATCH --output @@REMOTE_ROOT@@/slurm_logs/%j.out
+#SBATCH --error @@REMOTE_ROOT@@/slurm_logs/%j.err
+@@MAIL_BLOCK@@
+set -euo pipefail
+
+REMOTE_ROOT=@@REMOTE_ROOT@@
+AUDIT_LOG="$REMOTE_ROOT/audit.remote.log"
+
+# Append one JSON line to the remote audit log; hpc_fetch.sh merges it into the
+# local .hpc_audit.log so SLURM-side actions are visible alongside the rest.
+log_remote() {
+    printf '{"ts":"%s","actor":"slurm","action":"%s","jobid":"%s","name":"%s"%s}\n' \
+        "$(date -Iseconds)" "$1" "${SLURM_JOB_ID:-?}" "@@NAME@@" "$2" >> "$AUDIT_LOG"
+}
+
+log_remote job_start ",\"node\":\"$(hostname -s)\",\"gpus\":\"${SLURM_GPUS:-?}\""
+
+cd "$REMOTE_ROOT/@@REMOTE_SUBDIR@@"
+
+# --- HPC node gotchas (safe defaults; harmless off-GenomeDK) ---------------
+# Pin OpenMP to the SLURM allocation and disable the Intel OpenMP affinity
+# probe; some GenomeDK nodes have cgroup cpusets that trip the libomp affinity
+# assertion at startup (torch then crashes at import).
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export KMP_AFFINITY=disabled
+
+# --- project setup (HPC_JOB_SETUP / --setup): env activation, caches -------
+@@SETUP@@
+
+# --- the actual work -------------------------------------------------------
+rc=0
+@@COMMAND@@ || rc=$?
+
+log_remote job_end ",\"exit\":$rc"
+exit "$rc"

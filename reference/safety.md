@@ -2,16 +2,20 @@
 
 GenomeDK and clusters like it are shared infrastructure. These rules are non-negotiable and the wrappers encode them; do not work around them.
 
-1. **All remote writes are confined to `HPC_REMOTE_ROOT`.** Never edit `$HOME`, other projects, or anything system-wide. `hpc_push.sh`, `hpc_fetch.sh`, and `hpc_submit.py` refuse any destination outside it (`hpc_guard_remote`). Set it once in `hpc.env` and do not pass paths that escape it.
+The authoritative policy is the GenomeDK documentation at <https://genome.au.dk/docs/> (see *Partitions and resource limits* and *Computing with GPUs*). The figures below were current as of June 2026; if in doubt, check the docs.
+
+1. **All remote writes are confined to `HPC_REMOTE_ROOT`.** Never edit `$HOME`, other projects, or anything system-wide. `hpc_push.sh` and `hpc_fetch.sh` refuse any destination outside it via `hpc_guard_remote` (which also rejects `..` traversal); `hpc_submit.py` applies the equivalent check to `--name` and `--remote-subdir` before writing the job script. Set it once in `hpc.env` and do not pass paths that escape it.
 
 2. **No login-node compute.** The login node is for submitting jobs, rendering scripts, and short rsyncs only. Anything heavy goes through SLURM (`hpc_submit.py`). Never run training/inference/large analysis directly over `ssh <host> ...`.
 
-3. **GPU jobs must keep the GPU busy.** GenomeDK auto-cancels GPU jobs that sit below roughly 75% utilization in the first ~2 h. If a first run looks borderline, `ssh <host> nvidia-smi` to check. Right-size `--gpus`/`--cpus`/`--mem` to what the job actually uses.
+3. **GPU jobs must keep the GPU busy.** GenomeDK auto-cancels GPU jobs whose average utilization is below 75% after the first 2 h. If a first run looks borderline, `ssh <host> nvidia-smi` or `ssh <host> jobinfo <jobid>` to check. Right-size `--gpus`/`--cpus`/`--mem` to what the job actually uses.
 
-4. **rsync never uses `--delete`.** The wrappers never pass it. Per-task checkpoints and prior outputs on the remote are the resume mechanism for chunked/long runs; deleting them throws away progress.
+4. **Stay within the documented per-user limits.** GenomeDK caps a single job at a **7-day** walltime, and a user at **3600 cores** and **12 GPUs** in use at once. `--chunks` chains a long run as sequential array tasks, each within the partition's walltime cap, so the total run can exceed 7 days while no single task does. Do not try to defeat these caps.
 
-5. **The human types the OTP, not the assistant.** Two-factor login is interactive. Probe for a live socket first (`ssh -O check`, or `bash hpc_login.sh` which is a no-op when a socket exists) and only ask the human to authenticate when the probe fails.
+5. **rsync never uses `--delete`.** The wrappers never pass it. Per-task checkpoints and prior outputs on the remote are the resume mechanism for chunked/long runs; deleting them throws away progress.
 
-6. **Every action is logged.** `hpc_login.sh`, `hpc_status.sh`, `hpc_push.sh`, `hpc_fetch.sh`, and `hpc_submit.py` append one JSON line per action to `.hpc_audit.log` (gitignored), and the SLURM job appends `job_start`/`job_end` to a remote `audit.remote.log` that `hpc_fetch.sh` merges back. Inspect any time: `jq . .hpc_audit.log`. The log records intent and outcome only — never stdout/stderr — so it cannot leak data.
+6. **The human types the OTP, not the assistant.** Two-factor login is interactive. Probe for a live socket first (`ssh -O check`, or `bash hpc_login.sh` which is a no-op when a socket exists) and only ask the human to authenticate when the probe fails.
 
-7. **Avoid long foreground sleeps inside ssh.** A `sleep N; ssh ...` chain that receives SIGTERM tears down the ControlMaster socket. To wait for a job, poll with short `hpc_status.sh` calls or rely on the SLURM END/FAIL email, rather than blocking on a long sleep.
+7. **Every action is logged.** `hpc_login.sh`, `hpc_status.sh`, `hpc_push.sh`, `hpc_fetch.sh`, and `hpc_submit.py` append one JSON line per action to `.hpc_audit.log` (gitignored), and the SLURM job appends `job_start`/`job_end` to a remote `audit.remote.log` that `hpc_fetch.sh` merges back. Inspect any time: `jq . .hpc_audit.log`. The log records intent and outcome only — never stdout/stderr — so it cannot leak data.
+
+8. **Avoid long foreground sleeps inside ssh.** A `sleep N; ssh ...` chain that receives SIGTERM tears down the ControlMaster socket. To wait for a job, poll with short `hpc_status.sh` calls or rely on the SLURM END/FAIL email, rather than blocking on a long sleep.

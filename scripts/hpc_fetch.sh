@@ -8,6 +8,9 @@
 # <remote-subpath> is relative to HPC_REMOTE_ROOT and guarded against escaping
 # it. <local-dest> defaults to $HPC_LOCAL_ROOT/<remote-subpath>. A trailing
 # slash on <remote-subpath> copies directory contents (standard rsync rules).
+#
+# Also merges the SLURM-side audit.remote.log into the local audit log so
+# job_start/job_end events show up alongside the rest.
 set -euo pipefail
 . "$(dirname "$0")/_hpc_lib.sh"
 hpc_load_config
@@ -23,5 +26,9 @@ mkdir -p "$(dirname "$local_dest")"
 rc=0
 rsync -azP "$HPC_HOST:$remote" "$local_dest" || rc=$?
 hpc_audit rsync_pull --host "$HPC_HOST" --target "$sub" --exit "$rc"
+
+# Bring the SLURM-side audit log down too (independent of the fetch above).
+hpc_merge_remote_audit
+
 [ "$rc" -eq 0 ] || hpc_die "rsync pull failed (rc=$rc)"
 echo "fetched $HPC_HOST:$remote -> $local_dest"

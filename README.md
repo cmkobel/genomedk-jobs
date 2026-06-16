@@ -4,15 +4,25 @@ A [Claude Code](https://claude.com/claude-code) skill for offloading heavy compu
 
 Built for **GenomeDK** (Aarhus), but works on any SLURM cluster reachable through a multiplexed SSH alias.
 
+> The authoritative GenomeDK documentation is at <https://genome.au.dk/docs/>. This skill summarizes the parts it automates (login, partitions, GPU/resource limits); if anything is unclear or the cluster has changed, that site is the source of truth.
+
 ## Install
 
-Clone into your personal skills directory (available in every project):
+**1. Clone** into your personal skills directory (available in every project):
 
 ```bash
 git clone <repo-url> ~/.claude/skills/genomedk-jobs
 ```
 
-Then in each project, copy `config/hpc.env.example` to `hpc.env` at the project root and fill in your host, account, and remote working directory. The wrappers find it by walking up from the current directory.
+**2. Add the SSH alias** (one-time per machine). Put a `Host` block with connection multiplexing in `~/.ssh/config` so one login lasts the session. The exact block is in `reference/ssh_setup.md`.
+
+**3. Create the config** (once per project). Copy the example to your project root and fill it in:
+
+```bash
+cp ~/.claude/skills/genomedk-jobs/config/hpc.env.example /path/to/project/hpc.env
+```
+
+Set at least `HPC_HOST`, `HPC_ACCOUNT`, and `HPC_REMOTE_ROOT` (every remote write is confined to that directory); also `HPC_PARTITION`, `HPC_MAIL_USER`, and `HPC_PUSH_PATHS`. The file holds no secrets, so it is safe to commit. The wrappers find it by walking up from the current directory, so commands work from anywhere inside the project.
 
 ## Use
 
@@ -26,6 +36,8 @@ bash   $S/hpc_status.sh                              # squeue (read-only)
 bash   $S/hpc_fetch.sh results/myjob                 # rsync outputs back
 ```
 
+The assumed environment manager is **[pixi](https://pixi.sh)**: commit `pixi.toml`/`pixi.lock`, install once on the login node (`CONDA_OVERRIDE_CUDA=12.0 pixi install -e hpc`) since compute nodes have no internet, and run jobs via `pixi run`. Other managers (conda, venv, apptainer) work too — put activation in `HPC_JOB_SETUP`. See the **Dependencies** section in `SKILL.md`.
+
 Inside Claude Code, just describe the task ("submit an ESM-2 job to GenomeDK", "check my queue") and the skill activates.
 
 ## What is here
@@ -33,6 +45,7 @@ Inside Claude Code, just describe the task ("submit an ESM-2 job to GenomeDK", "
 - `SKILL.md` is the full operating manual: the workflow, the `--chunks` long-run pattern, and a worked ESM-2 example. Read this for detail.
 - `config/hpc.env.example` is the one file you edit per project.
 - `scripts/` holds the wrappers; `templates/job.slurm.tmpl` is the generic SBATCH template.
+- `scripts/hpc_selftest.sh` validates the install: `bash scripts/hpc_selftest.sh` runs offline checks (syntax, config loading, the safety guard, template rendering, the audit logger); add `--online` to also probe a configured cluster read-only.
 - `reference/ssh_setup.md` is the `~/.ssh/config` block to add (one-time per machine); `reference/safety.md` is the hard rules for a shared cluster.
 
 ## Safety

@@ -18,6 +18,7 @@ Host genomedk
 - `ControlMaster auto` + `ControlPath` + `ControlPersist 12h` are what let `hpc_login.sh` warm a socket that survives ~12 h. Without them, every command re-prompts for the OTP.
 - `bash hpc_login.sh` authenticates once (you type the OTP); after that, `ssh -O check <host>` reports the live socket and the wrappers skip the prompt.
 - The two-factor login cannot be automated. The human types the OTP. The assistant should always probe first (`ssh -O check`, or `ssh -o BatchMode=yes <host> true`) and only ask the human to run `bash hpc_login.sh` when the probe fails — if you are on a whitelisted IP, re-login may be no-friction.
+- **First login only:** GenomeDK requires two-factor enrollment on the very first login (install an authenticator app, then scan the QR from `gdk-auth-show-qr`). Without it you cannot access the account. Full walkthrough: <https://genome.au.dk/docs/getting-started/>.
 
 ## Other SLURM clusters
 

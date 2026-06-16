@@ -43,8 +43,13 @@ hpc_load_config() {
 }
 
 # Refuse any remote path that is not HPC_REMOTE_ROOT or under it. Call this on
-# every path before an ssh mkdir / rsync destination / submit target.
+# every path before an ssh mkdir / rsync destination / submit target. A bare
+# prefix check is not enough: a ".." component keeps the prefix while escaping
+# the root (e.g. $ROOT/../../etc), so reject ".." outright first.
 hpc_guard_remote() {
+    case "$1" in
+        ..|../*|*/..|*/../*) hpc_die "refusing path with a '..' component: $1" ;;
+    esac
     case "$1" in
         "$HPC_REMOTE_ROOT"|"$HPC_REMOTE_ROOT"/*) : ;;
         *) hpc_die "refusing to operate outside HPC_REMOTE_ROOT ($HPC_REMOTE_ROOT): $1" ;;
@@ -56,4 +61,21 @@ hpc_audit() {
     local here
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     python3 "$here/_hpc_log.py" "$@"
+}
+
+# Pull the SLURM-side audit log ($HPC_REMOTE_ROOT/audit.remote.log, written by
+# the job template's log_remote) and append any lines not already present to the
+# local audit log, so job_start/job_end show up alongside login/push/fetch.
+# Best-effort: a silent no-op if the remote log does not exist yet.
+hpc_merge_remote_audit() {
+    local remote_audit="$HPC_REMOTE_ROOT/audit.remote.log" tmp line
+    tmp="$(mktemp)" || return 0
+    if rsync -az "$HPC_HOST:$remote_audit" "$tmp" 2>/dev/null; then
+        touch "$HPC_AUDIT_LOG"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            grep -qxF -- "$line" "$HPC_AUDIT_LOG" 2>/dev/null || printf '%s\n' "$line" >> "$HPC_AUDIT_LOG"
+        done < "$tmp"
+    fi
+    rm -f "$tmp"
 }

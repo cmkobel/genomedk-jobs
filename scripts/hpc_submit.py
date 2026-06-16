@@ -79,6 +79,15 @@ def render(tmpl: str, mapping: dict[str, str]) -> str:
     return out
 
 
+def guard_under_root(path: str, root: str, what: str) -> str:
+    """Reject a remote path that escapes HPC_REMOTE_ROOT (mirrors hpc_guard_remote
+    in _hpc_lib.sh). Returns the normalized path."""
+    norm = os.path.normpath(path)
+    if norm != root and not norm.startswith(root.rstrip("/") + "/"):
+        raise SystemExit(f"refusing to operate outside HPC_REMOTE_ROOT ({root}): {what}={path}")
+    return norm
+
+
 def main() -> None:
     cfg = load_config()
     # Make the audit helper write to this project's log.
@@ -118,6 +127,13 @@ def main() -> None:
     root = cfg["HPC_REMOTE_ROOT"]
     mail_user = cfg.get("HPC_MAIL_USER", "")
 
+    # Safety guard: --name becomes a remote filename and --remote-subdir a remote
+    # working dir; both must stay inside HPC_REMOTE_ROOT (see reference/safety.md).
+    if "/" in args.name or ".." in args.name or not args.name.strip():
+        raise SystemExit(f"--name must be a bare filename without '/' or '..': {args.name!r}")
+    guard_under_root(f"{root}/slurm_logs/{args.name}.slurm", root, "--name")
+    guard_under_root(f"{root}/{args.remote_subdir}", root, "--remote-subdir")
+
     mail_block = (f"#SBATCH --mail-type END,FAIL\n#SBATCH --mail-user {mail_user}\n"
                   if mail_user else "")
     gpu_block = f"#SBATCH --gpus {args.gpus}\n" if args.gpus > 0 else ""
@@ -154,11 +170,16 @@ def main() -> None:
     if write.returncode != 0:
         raise SystemExit("failed to write the SLURM script on the remote")
 
-    out = subprocess.run(["ssh", host, f"sbatch {remote_path}"],
-                         check=True, capture_output=True, text=True).stdout.strip()
-    jobid = out.split()[-1] if out else "?"
+    proc = subprocess.run(["ssh", host, f"sbatch {remote_path}"],
+                          capture_output=True, text=True)
+    out = proc.stdout.strip()
+    jobid = out.split()[-1] if (proc.returncode == 0 and out) else "?"
+    # Audit every submission attempt, success or failure (not just the happy path).
     log("sbatch_submit", host=host, name=args.name, script=remote_path,
-        jobid=jobid, exit=0)
+        jobid=jobid, exit=proc.returncode)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"sbatch failed (rc={proc.returncode})")
 
     print(f"\nSubmitted jobid={jobid}")
     print(f"Watch:  ssh {host} squeue -j {jobid}")

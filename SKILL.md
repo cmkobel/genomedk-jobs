@@ -48,7 +48,7 @@ This matters most when settings auto-approve Bash (`Bash(*)`), where no permissi
 ## One-time setup per project
 
 1. **SSH alias with multiplexing.** Add a `Host` block to `~/.ssh/config` so one login lasts ~12 h. See `reference/ssh_setup.md` for the exact block.
-2. **Config.** Copy `config/hpc.env.example` to `hpc.env` at the project root and fill in `HPC_HOST`, `HPC_ACCOUNT`, `HPC_REMOTE_ROOT`, `HPC_PARTITION`, `HPC_MAIL_USER`, and `HPC_PUSH_PATHS`. The wrappers find it by walking up from the current directory. It holds no secrets, so it is safe to commit. Add `.hpc_audit.log` to `.gitignore`.
+2. **Config.** Copy `config/hpc.env.example` to `hpc.env` at the project root and fill in `HPC_HOST`, `HPC_ACCOUNT`, `HPC_REMOTE_ROOT`, `HPC_PARTITION`, `HPC_MAIL_USER`, and `HPC_PUSH_PATHS`. The wrappers find it by walking up from the current directory. It holds no secrets, so it is safe to commit. Add the wrappers' local artifacts — `.hpc_audit.log` and `.hpc_root_verified` — to your project's `.gitignore`.
 
 ## Validate the install
 

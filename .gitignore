@@ -1,0 +1,10 @@
+# Transient artifacts the wrappers create when run from inside a project.
+# (In a consuming project, add these to that project's .gitignore too.)
+.hpc_audit.log
+.hpc_root_verified
+.hpc_backups/
+
+# Python / OS noise
+__pycache__/
+*.pyc
+.DS_Store

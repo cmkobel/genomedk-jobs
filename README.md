@@ -51,3 +51,7 @@ Inside Claude Code, just describe the task ("submit an ESM-2 job to GenomeDK", "
 ## Safety
 
 The wrappers confine every remote write to the configured project directory, never pass `rsync --delete`, and append a JSONL line per action to `.hpc_audit.log`. The human types the OTP, never the assistant. Read `reference/safety.md` before running anything on a shared cluster.
+
+## License
+
+[MIT](LICENSE). Provided as-is, without warranty of any kind; the authors are not liable for any damages arising from its use.

@@ -20,6 +20,31 @@ Primary target is **GenomeDK** (Aarhus). It also works on any SLURM cluster you 
 
 `reference/safety.md` is non-negotiable, especially: all remote writes confined to `HPC_REMOTE_ROOT`; no login-node compute; never `rsync --delete`; the **human types the OTP, not you**; every action is audited. Read it before doing anything on a cluster.
 
+The wrappers enforce much of this themselves: every agent-supplied value that reaches a remote shell (job name, jobid, paths) is restricted to a safe character set so it cannot inject commands; the first push/submit verifies `HPC_REMOTE_ROOT` is owned by you; and an optional hook (below) blocks bypass attempts at the harness level.
+
+## Enforce the safety rules with a hook (recommended)
+
+The wrappers confine writes and never delete — but nothing stops an agent from bypassing them with a raw `ssh <host> 'rm -rf …'` or `rsync --delete`. `scripts/hpc_guard_hook.py` is a Claude Code **PreToolUse** hook that blocks those at the harness level. It is narrowly scoped: it only acts on commands that target your configured `HPC_HOST` in a project that has an `hpc.env`, so enabling it globally is a no-op everywhere else.
+
+Add this to your `settings.json` (`~/.claude/settings.json` for every project, or a project's `.claude/settings.json` for one). `~` is **not** expanded in hook commands, so use `$HOME` (or `$CLAUDE_PROJECT_DIR/.claude/skills/...` for a per-project install):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 $HOME/.claude/skills/genomedk-jobs/scripts/hpc_guard_hook.py" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This matters most when settings auto-approve Bash (`Bash(*)`), where no permission prompt catches a bad command. The hook fails open on any internal error, so it can never wedge your shell — the hardened wrappers remain the primary safeguard.
+
 ## One-time setup per project
 
 1. **SSH alias with multiplexing.** Add a `Host` block to `~/.ssh/config` so one login lasts ~12 h. See `reference/ssh_setup.md` for the exact block.
@@ -58,6 +83,7 @@ bash $S/hpc_fetch.sh results/myjob         # rsync a remote subpath back down
 - **Partitions.** `--partition` (or `HPC_PARTITION`) takes a single name or a comma-list; SLURM picks the first free one and the walltime cap becomes the most restrictive partition in the list. On GenomeDK the GPU partitions are `gpu-l40s`/`gpu-short` (L40S, 48 GB) and `gpu-h200` (H200, 141 GB); run `gnodes` on the login node for the live list and per-node limits.
 - **Status detail.** `hpc_status.sh` runs `squeue` (portable across clusters). On GenomeDK, `ssh $HPC_HOST jobinfo <jobid>` reports more — memory use and live GPU utilization — which is the quickest way to confirm a GPU job is clearing the 75%-after-2h auto-cancel threshold (see safety rule 3).
 - **Push excludes.** `hpc_push.sh` skips `.git/`, `__pycache__/`, `.pixi/`, `.ipynb_checkpoints/`, `*.ipynb`, and `.DS_Store`. Note that notebooks (`*.ipynb`) are excluded by default; pass a notebook explicitly as a `<local>` argument if a job needs one.
+- **Preview & overwrites.** `bash hpc_push.sh --dry-run` (and `hpc_fetch.sh --dry-run`) previews the transfer without writing anything. Push never deletes, but it does *overwrite* a remote file whose local copy differs — set `HPC_PUSH_BACKUP=1` to keep overwritten copies under `$HPC_REMOTE_ROOT/.hpc_backups/<timestamp>`. The first push/submit also confirms over SSH that `HPC_REMOTE_ROOT` is owned by you and refuses otherwise (override with `HPC_ALLOW_UNOWNED_ROOT=1` for a shared dir); the result is cached in `.hpc_root_verified` (gitignore it alongside `.hpc_audit.log`).
 
 ## Dependencies: pixi
 
@@ -103,6 +129,7 @@ genomedk-jobs/
 │   ├── hpc_push.sh             # rsync inputs/code up (never --delete)
 │   ├── hpc_submit.py           # render template + sbatch + capture jobid
 │   ├── hpc_fetch.sh            # rsync outputs down (never --delete)
+│   ├── hpc_guard_hook.py       # optional PreToolUse hook: block bypass attempts
 │   └── hpc_selftest.sh         # validate the skill (offline; --online probes the cluster)
 ├── templates/job.slurm.tmpl    # generic SBATCH template (@@PLACEHOLDER@@ substitution)
 └── reference/

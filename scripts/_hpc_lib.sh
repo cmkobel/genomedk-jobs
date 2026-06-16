@@ -36,17 +36,31 @@ hpc_load_config() {
         /*) : ;;
         *) hpc_die "HPC_REMOTE_ROOT must be an absolute path: $HPC_REMOTE_ROOT" ;;
     esac
+    # HPC_REMOTE_ROOT is interpolated into remote shell commands all over the
+    # skill, so it must contain no shell metacharacters.
+    hpc_reject_unsafe "$HPC_REMOTE_ROOT" "HPC_REMOTE_ROOT"
     : "${HPC_LOCAL_ROOT:=$(cd "$(dirname "$cfg")" && pwd)}"
     : "${HPC_AUDIT_LOG:=$HPC_LOCAL_ROOT/.hpc_audit.log}"
     : "${HPC_CODE_SUBDIR:=repo}"
     export HPC_HOST HPC_ACCOUNT HPC_REMOTE_ROOT HPC_LOCAL_ROOT HPC_AUDIT_LOG HPC_CODE_SUBDIR HPC_CONFIG
 }
 
+# Reject a string that contains anything outside a conservative safe set
+# (letters, digits, '.', '_', '/', '-'). Every value the skill interpolates into
+# a remote shell command passes through here so a crafted path/name cannot break
+# out of the command (e.g. ';rm -rf ~', '$(...)', backticks, spaces, newlines).
+hpc_reject_unsafe() {
+    local val="$1" what="${2:-value}" stripped
+    stripped="${val//[A-Za-z0-9._\/-]/}"
+    [ -z "$stripped" ] || hpc_die "refusing $what with unsafe character(s) [$stripped]: $val"
+}
+
 # Refuse any remote path that is not HPC_REMOTE_ROOT or under it. Call this on
 # every path before an ssh mkdir / rsync destination / submit target. A bare
 # prefix check is not enough: a ".." component keeps the prefix while escaping
-# the root (e.g. $ROOT/../../etc), so reject ".." outright first.
+# the root (e.g. $ROOT/../../etc), so reject ".." and shell metacharacters first.
 hpc_guard_remote() {
+    hpc_reject_unsafe "$1" "remote path"
     case "$1" in
         ..|../*|*/..|*/../*) hpc_die "refusing path with a '..' component: $1" ;;
     esac
@@ -78,4 +92,35 @@ hpc_merge_remote_audit() {
         done < "$tmp"
     fi
     rm -f "$tmp"
+}
+
+# Before the first remote write, confirm HPC_REMOTE_ROOT is actually yours, so a
+# mistyped config cannot push/submit into another project's directory. Result is
+# cached in a local marker (host::root) so it costs one ssh per project, not per
+# command. A genuinely shared root you do not own can be allowed with
+# HPC_ALLOW_UNOWNED_ROOT=1. Callers: hpc_push.sh, hpc_submit.py (mirrored).
+hpc_verify_root() {
+    local marker="$HPC_LOCAL_ROOT/.hpc_root_verified" want status
+    want="$HPC_HOST::$HPC_REMOTE_ROOT"
+    [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$want" ] && return 0
+
+    status="$(ssh "$HPC_HOST" "if [ ! -e '$HPC_REMOTE_ROOT' ]; then echo missing; elif [ -O '$HPC_REMOTE_ROOT' ]; then echo owned; else echo notowned; fi" 2>/dev/null)" \
+        || hpc_die "could not reach $HPC_HOST to verify HPC_REMOTE_ROOT — is the SSH socket up? (run hpc_login.sh)"
+
+    case "$status" in
+        owned) ;;
+        missing)
+            echo "hpc: HPC_REMOTE_ROOT does not exist yet on $HPC_HOST: $HPC_REMOTE_ROOT" >&2
+            echo "     it will be created on first push — double-check the path in hpc.env is correct." >&2
+            ;;
+        notowned)
+            [ "${HPC_ALLOW_UNOWNED_ROOT:-0}" = 1 ] || hpc_die \
+"HPC_REMOTE_ROOT exists but is not owned by you on $HPC_HOST:
+       $HPC_REMOTE_ROOT
+   This often means hpc.env points at the wrong path (e.g. another project).
+   If it is genuinely yours (a shared project dir), re-run with HPC_ALLOW_UNOWNED_ROOT=1." ;;
+        *) hpc_die "unexpected response while verifying HPC_REMOTE_ROOT: '$status'" ;;
+    esac
+
+    printf '%s\n' "$want" > "$marker" 2>/dev/null || true
 }

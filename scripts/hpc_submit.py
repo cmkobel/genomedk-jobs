@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -79,6 +81,20 @@ def render(tmpl: str, mapping: dict[str, str]) -> str:
     return out
 
 
+_SAFE = re.compile(r"\A[A-Za-z0-9._/-]+\Z")
+
+
+def reject_unsafe(val: str, what: str, allow_slash: bool = True) -> str:
+    """Reject a value with shell metacharacters before it reaches a remote shell
+    (mirrors hpc_reject_unsafe in _hpc_lib.sh). Set allow_slash=False for a bare
+    filename like --name."""
+    pat = _SAFE if allow_slash else re.compile(r"\A[A-Za-z0-9._-]+\Z")
+    if not val or ".." in val or not pat.match(val):
+        kind = "letters, digits, . _ -" + (" /" if allow_slash else " (no '/')")
+        raise SystemExit(f"{what} must use only {kind}, no '..': {val!r}")
+    return val
+
+
 def guard_under_root(path: str, root: str, what: str) -> str:
     """Reject a remote path that escapes HPC_REMOTE_ROOT (mirrors hpc_guard_remote
     in _hpc_lib.sh). Returns the normalized path."""
@@ -86,6 +102,37 @@ def guard_under_root(path: str, root: str, what: str) -> str:
     if norm != root and not norm.startswith(root.rstrip("/") + "/"):
         raise SystemExit(f"refusing to operate outside HPC_REMOTE_ROOT ({root}): {what}={path}")
     return norm
+
+
+def verify_root(host: str, root: str, local_root: str) -> None:
+    """Confirm HPC_REMOTE_ROOT is owned by us before writing, so a mistyped config
+    can't submit into another project. Honors the same marker + override as
+    hpc_verify_root in _hpc_lib.sh: a push earlier in the session already verified."""
+    marker = Path(local_root) / ".hpc_root_verified"
+    want = f"{host}::{root}"
+    try:
+        if marker.is_file() and marker.read_text().strip() == want:
+            return
+    except OSError:
+        pass
+    probe = (f"if [ ! -e {shlex.quote(root)} ]; then echo missing; "
+             f"elif [ -O {shlex.quote(root)} ]; then echo owned; else echo notowned; fi")
+    res = subprocess.run(["ssh", host, probe], capture_output=True, text=True)
+    if res.returncode != 0:
+        raise SystemExit(f"could not reach {host} to verify HPC_REMOTE_ROOT — "
+                         "is the SSH socket up? (run hpc_login.sh)")
+    status = res.stdout.strip()
+    if status == "notowned" and os.environ.get("HPC_ALLOW_UNOWNED_ROOT") != "1":
+        raise SystemExit(
+            f"HPC_REMOTE_ROOT exists but is not owned by you on {host}:\n  {root}\n"
+            "  This often means hpc.env points at the wrong path. If it is genuinely\n"
+            "  yours (a shared project dir), re-run with HPC_ALLOW_UNOWNED_ROOT=1.")
+    if status == "missing":
+        sys.stderr.write(f"note: HPC_REMOTE_ROOT does not exist yet on {host}: {root}\n")
+    try:
+        marker.write_text(want + "\n")
+    except OSError:
+        pass
 
 
 def main() -> None:
@@ -125,12 +172,14 @@ def main() -> None:
 
     host = cfg["HPC_HOST"]
     root = cfg["HPC_REMOTE_ROOT"]
+    reject_unsafe(root, "HPC_REMOTE_ROOT")  # interpolated into remote shells
     mail_user = cfg.get("HPC_MAIL_USER", "")
 
     # Safety guard: --name becomes a remote filename and --remote-subdir a remote
-    # working dir; both must stay inside HPC_REMOTE_ROOT (see reference/safety.md).
-    if "/" in args.name or ".." in args.name or not args.name.strip():
-        raise SystemExit(f"--name must be a bare filename without '/' or '..': {args.name!r}")
+    # working dir, both interpolated into remote shell commands — so restrict them
+    # to a safe charset and keep them inside HPC_REMOTE_ROOT (see safety.md).
+    reject_unsafe(args.name, "--name", allow_slash=False)
+    reject_unsafe(args.remote_subdir, "--remote-subdir")
     guard_under_root(f"{root}/slurm_logs/{args.name}.slurm", root, "--name")
     guard_under_root(f"{root}/{args.remote_subdir}", root, "--remote-subdir")
 
@@ -160,17 +209,21 @@ def main() -> None:
         print(rendered)
         return
 
+    # Confirm the root is really ours before writing anything to it.
+    verify_root(host, root, cfg["HPC_LOCAL_ROOT"])
+
     remote_path = f"{root}/slurm_logs/{args.name}.slurm"
+    qpath = shlex.quote(remote_path)
     print(f"Submitting name={args.name} partition={args.partition or '(default)'} "
           f"gpus={args.gpus} time={args.time} chunks={args.chunks}")
 
-    subprocess.run(["ssh", host, f"mkdir -p {root}/slurm_logs"], check=True)
-    write = subprocess.run(["ssh", host, f"cat > {remote_path}"],
+    subprocess.run(["ssh", host, f"mkdir -p {shlex.quote(root + '/slurm_logs')}"], check=True)
+    write = subprocess.run(["ssh", host, f"cat > {qpath}"],
                            input=rendered, text=True)
     if write.returncode != 0:
         raise SystemExit("failed to write the SLURM script on the remote")
 
-    proc = subprocess.run(["ssh", host, f"sbatch {remote_path}"],
+    proc = subprocess.run(["ssh", host, f"sbatch {qpath}"],
                           capture_output=True, text=True)
     out = proc.stdout.strip()
     jobid = out.split()[-1] if (proc.returncode == 0 and out) else "?"

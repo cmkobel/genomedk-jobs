@@ -21,6 +21,7 @@ SKILL_DIR="$(cd "$HERE/.." && pwd)"
 SUBMIT="$HERE/hpc_submit.py"
 LIB="$HERE/_hpc_lib.sh"
 LOGGER="$HERE/_hpc_log.py"
+HOOK="$HERE/hpc_guard_hook.py"
 
 ONLINE=0
 [ "${1:-}" = "--online" ] && ONLINE=1
@@ -62,8 +63,9 @@ EOF
 
 section "Syntax"
 for f in "$HERE"/*.sh; do expect_ok "bash -n $(basename "$f")" bash -n "$f"; done
-expect_ok "py_compile hpc_submit.py" python3 -m py_compile "$SUBMIT"
-expect_ok "py_compile _hpc_log.py"   python3 -m py_compile "$LOGGER"
+expect_ok "py_compile hpc_submit.py"    python3 -m py_compile "$SUBMIT"
+expect_ok "py_compile _hpc_log.py"      python3 -m py_compile "$LOGGER"
+expect_ok "py_compile hpc_guard_hook.py" python3 -m py_compile "$HOOK"
 
 section "Config loading (_hpc_lib.sh)"
 HPC_CONFIG="$TMP/hpc.env" expect_ok "loads a valid hpc.env" \
@@ -76,16 +78,21 @@ HPC_CONFIG="$TMP/bad_relative.env" expect_fail "rejects a relative HPC_REMOTE_RO
 section "Remote-root guard (hpc_guard_remote)"
 ROOT=/faststorage/project/test/root
 guard() { HPC_REMOTE_ROOT="$ROOT" bash -c '. "$1"; hpc_guard_remote "$2"' _ "$LIB" "$1"; }
-expect_ok   "accepts a path under the root"      guard "$ROOT/results/myjob"
+expect_ok   "accepts a path under the root"      guard "$ROOT/results/my-job_1"
 expect_ok   "accepts the root itself"            guard "$ROOT"
 expect_fail "rejects '..' traversal"             guard "$ROOT/../../etc/passwd"
 expect_fail "rejects a trailing '..'"            guard "$ROOT/sub/.."
 expect_fail "rejects a sibling outside the root" guard "/faststorage/project/test/other"
+expect_fail "rejects ';' (command injection)"    guard "$ROOT/x;rm -rf ~"
+expect_fail "rejects '\$(...)' substitution"      guard "$ROOT/\$(id)"
+expect_fail "rejects a space"                    guard "$ROOT/a b"
 
 section "Submit guard + template rendering (hpc_submit.py)"
 sub() { HPC_CONFIG="$TMP/hpc.env" python3 "$SUBMIT" "$@"; }
 expect_fail "rejects --name with '/'"            sub --name a/b           --command 'echo hi' --dry-run
 expect_fail "rejects --name with '..'"           sub --name ../../x       --command 'echo hi' --dry-run
+expect_fail "rejects --name with metacharacters" sub --name 'job;whoami'  --command 'echo hi' --dry-run
+expect_fail "rejects --name with a space"        sub --name 'a b'         --command 'echo hi' --dry-run
 expect_fail "rejects escaping --remote-subdir"   sub --name ok --remote-subdir ../../etc --command 'echo hi' --dry-run
 
 render="$(sub --name selftest --command 'python work.py' --gpus 0 --chunks 3 --dry-run 2>/dev/null)"
@@ -111,6 +118,31 @@ line = open(sys.argv[1]).read().splitlines()[-1]
 d = json.loads(line)
 assert d["action"] == "selftest_action" and d["host"] == "h1" and d["exit"] == 0, d
 PY
+
+section "Deny-hook (hpc_guard_hook.py)"
+# Feed a PreToolUse payload; the fake hpc.env's HPC_HOST is 'selftest-host'.
+hook_ec() {
+    local payload
+    payload="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1")"
+    printf '%s' "$payload" | HPC_CONFIG="$TMP/hpc.env" python3 "$HOOK" >/dev/null 2>&1
+    echo $?
+}
+expect_block() { local d="$1"; if [ "$(hook_ec "$2")" = 2 ]; then ok "$d"; else bad "$d"; fi; }
+expect_allow() { local d="$1"; if [ "$(hook_ec "$2")" = 0 ]; then ok "$d"; else bad "$d"; fi; }
+expect_block "blocks rsync --delete to the host"  "rsync -az --delete ./x selftest-host:/faststorage/project/test/root/"
+expect_block "blocks 'ssh host rm -rf'"           "ssh selftest-host 'rm -rf /faststorage/project/test/root/out'"
+expect_block "blocks 'ssh host mkfs'"             "ssh selftest-host mkfs.ext4 /dev/sdb"
+expect_allow "allows a wrapper invocation"        "bash scripts/hpc_push.sh"
+expect_allow "allows a normal rsync push"         "rsync -azP ./src selftest-host:/faststorage/project/test/root/repo/"
+expect_allow "allows 'ssh host squeue'"           "ssh selftest-host squeue -u me"
+expect_allow "allows a local rm (not the host)"   "rm -rf /tmp/scratch"
+expect_allow "allows local rsync --delete (no host)" "rsync -a --delete ./a ./b"
+
+section "Root verification (cached marker)"
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+HPC_CONFIG="$TMP/hpc.env" expect_ok "hpc_verify_root short-circuits on a matching marker (no ssh)" \
+    bash -c '. "$0"; hpc_load_config; hpc_verify_root' "$LIB"
+rm -f "$TMP/.hpc_root_verified"
 
 if [ "$ONLINE" = 1 ]; then
     section "Online checks (read-only; uses your real hpc.env)"

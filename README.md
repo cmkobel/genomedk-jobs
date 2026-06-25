@@ -11,7 +11,7 @@ Built for **GenomeDK** (Aarhus), but works on any SLURM cluster reachable throug
 **1. Clone** into your personal skills directory (available in every project):
 
 ```bash
-git clone <repo-url> ~/.claude/skills/genomedk-jobs
+git clone https://codeberg.org/cmkobel/genomedk-jobs.git ~/.claude/skills/genomedk-jobs
 ```
 
 **2. Add the SSH alias** (one-time per machine). Put a `Host` block with connection multiplexing in `~/.ssh/config` so one login lasts the session. The exact block is in `reference/ssh_setup.md`.

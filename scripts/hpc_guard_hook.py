@@ -41,8 +41,14 @@ RULES = [
     (r":\s*\(\s*\)\s*\{", "fork-bomb pattern blocked."),
     (r"\bchmod\b\s+-R\b", "recursive chmod over ssh is blocked."),
     (r"\bchown\b\s+-R\b", "recursive chown over ssh is blocked."),
-    (r">\s*/(?:dev|etc|usr|bin|boot|sys|proc|lib)\b",
-     "redirect into a system path is blocked."),
+    (r">\s*/(?:etc|usr|bin|boot|sys|proc|lib)\b",
+     "redirect into a system path (e.g. > /etc/...) is blocked."),
+    # Block writes to device files (e.g. > /dev/sda) but NOT the universally
+    # benign sinks 2>/dev/null, >/dev/stdout|stderr|tty, >/dev/fd/N — otherwise a
+    # routine `... 2>/dev/null` diagnostic would be refused.
+    (r">\s*/dev/(?!(?:null|stdout|stderr|tty)\b|fd/)",
+     "redirect to a device file is blocked (/dev/null, /dev/std{out,err}, "
+     "/dev/tty, /dev/fd/N are allowed)."),
 ]
 
 

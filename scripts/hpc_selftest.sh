@@ -137,11 +137,33 @@ expect_allow "allows a normal rsync push"         "rsync -azP ./src selftest-hos
 expect_allow "allows 'ssh host squeue'"           "ssh selftest-host squeue -u me"
 expect_allow "allows a local rm (not the host)"   "rm -rf /tmp/scratch"
 expect_allow "allows local rsync --delete (no host)" "rsync -a --delete ./a ./b"
+expect_allow "allows a benign '2>/dev/null' redirect" "ssh selftest-host 'squeue -j 1 2>/dev/null'"
+expect_block "blocks '> /etc/...' (system path)"   "ssh selftest-host 'echo x > /etc/passwd'"
+expect_block "blocks '> /dev/sda' (device write)"  "ssh selftest-host 'cat z > /dev/sda'"
 
 section "Root verification (cached marker)"
 printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
 HPC_CONFIG="$TMP/hpc.env" expect_ok "hpc_verify_root short-circuits on a matching marker (no ssh)" \
     bash -c '. "$0"; hpc_load_config; hpc_verify_root' "$LIB"
+rm -f "$TMP/.hpc_root_verified"
+
+section "Wrapper execution — empty-array safety (stubbed ssh/rsync)"
+# Run hpc_push.sh / hpc_fetch.sh end-to-end with ssh+rsync stubbed and WITHOUT
+# --dry-run, so the optional-arg arrays (DRY, backup) are expanded while empty.
+# That is the exact path that aborts under bash 3.2's `set -u` if a wrapper uses
+# a bare "${arr[@]}" on an empty array — and a --dry-run test would NOT catch it
+# (--dry-run makes DRY non-empty). Guards the macOS /bin/bash 3.2 regression.
+STUB="$TMP/stubbin"; mkdir -p "$STUB"
+printf '#!/bin/sh\nexit 0\n' > "$STUB/ssh"
+printf '#!/bin/sh\nexit 0\n' > "$STUB/rsync"
+chmod +x "$STUB/ssh" "$STUB/rsync"
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+expect_ok "hpc_push.sh runs end-to-end (no --dry-run) under bash $BASH_VERSION" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_push.sh"
+expect_ok "hpc_fetch.sh runs end-to-end (no --dry-run) under bash $BASH_VERSION" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_fetch.sh" repo/results
+expect_ok "hpc_push.sh honors -c <config>" \
+    env "PATH=$STUB:$PATH" bash "$HERE/hpc_push.sh" -c "$TMP/hpc.env" --dry-run
 rm -f "$TMP/.hpc_root_verified"
 
 if [ "$ONLINE" = 1 ]; then

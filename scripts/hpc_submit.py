@@ -15,8 +15,12 @@ Examples:
         --time 12:00:00 --gpus 1 --cpus 8 --mem 16g
 
     # chain a long run as 3 sequential array tasks (each resumes from a checkpoint)
-    python hpc_submit.py --name esm2-wheat --chunks 3 --time 12:00:00 \
+    python hpc_submit.py --name esm2-wheat --chunks 3 --gpus 1 --time 12:00:00 \
         --command "pixi run -e hpc python scripts/compute_esm2.py --species wheat --device cuda"
+
+    # CPU-only job (the default): no GPU directive is emitted
+    python hpc_submit.py --name primes --cpus 1 --mem 2g --time 00:05:00 \
+        --command "python3 scripts/compute_primes.py"
 
     # see the rendered script without submitting
     python hpc_submit.py --name probe --command "nvidia-smi" --dry-run
@@ -135,7 +139,21 @@ def verify_root(host: str, root: str, local_root: str) -> None:
         pass
 
 
+def _preparse_config() -> None:
+    """Honor -c/--config before load_config() runs (defaults are drawn from the
+    config, so it must be resolved before argparse builds the parser)."""
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a in ("-c", "--config") and i + 1 < len(argv):
+            os.environ["HPC_CONFIG"] = argv[i + 1]
+            return
+        if a.startswith("--config="):
+            os.environ["HPC_CONFIG"] = a.split("=", 1)[1]
+            return
+
+
 def main() -> None:
+    _preparse_config()
     cfg = load_config()
     # Make the audit helper write to this project's log.
     os.environ.setdefault("HPC_LOCAL_ROOT", cfg["HPC_LOCAL_ROOT"])
@@ -155,7 +173,12 @@ def main() -> None:
     p.add_argument("--time", default="12:00:00", help="walltime HH:MM:SS")
     p.add_argument("--partition", default=cfg.get("HPC_PARTITION", ""),
                    help="single name or comma-list; SLURM picks the first free one")
-    p.add_argument("--gpus", type=int, default=1, help="GPUs (0 to omit the directive)")
+    p.add_argument("--gpus", type=int, default=0,
+                   help="GPUs to request; default 0 (CPU-only, no GPU directive). "
+                        "Pass --gpus N to request a GPU.")
+    p.add_argument("-c", "--config",
+                   help="path to hpc.env (overrides directory-walk discovery); "
+                        "equivalent to setting HPC_CONFIG")
     p.add_argument("--cpus", type=int, default=8)
     p.add_argument("--mem", default="16g")
     p.add_argument("--chunks", type=int, default=1,

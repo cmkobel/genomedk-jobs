@@ -7,9 +7,13 @@
 # exits immediately without prompting — always run it (or `ssh -O check`) before
 # asking the user to authenticate.
 #
-# Usage: bash hpc_login.sh
+# Usage: bash hpc_login.sh [-c hpc.env]
 set -euo pipefail
 . "$(dirname "$0")/_hpc_lib.sh"
+if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--config" ]; then
+    [ -n "${2:-}" ] || hpc_die "$1 needs a path to an hpc.env file"
+    export HPC_CONFIG="$2"; shift 2
+fi
 hpc_load_config
 
 if ssh -O check "$HPC_HOST" 2>/dev/null; then

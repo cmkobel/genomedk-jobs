@@ -3,7 +3,7 @@
 # --delete.
 #
 # Usage:
-#   bash hpc_fetch.sh [--dry-run] <remote-subpath> [local-dest]
+#   bash hpc_fetch.sh [-c hpc.env] [--dry-run] <remote-subpath> [local-dest]
 #
 # <remote-subpath> is relative to HPC_REMOTE_ROOT and guarded against escaping
 # it. <local-dest> defaults to $HPC_LOCAL_ROOT/<remote-subpath>. A trailing
@@ -14,6 +14,10 @@
 # job_start/job_end events show up alongside the rest.
 set -euo pipefail
 . "$(dirname "$0")/_hpc_lib.sh"
+if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--config" ]; then
+    [ -n "${2:-}" ] || hpc_die "$1 needs a path to an hpc.env file"
+    export HPC_CONFIG="$2"; shift 2
+fi
 hpc_load_config
 
 DRY=()
@@ -31,7 +35,7 @@ local_dest="${2:-$HPC_LOCAL_ROOT/$sub}"
 mkdir -p "$(dirname "$local_dest")"
 
 rc=0
-rsync -azP "${DRY[@]}" "$HPC_HOST:$remote" "$local_dest" || rc=$?
+rsync -azP ${DRY[@]+"${DRY[@]}"} "$HPC_HOST:$remote" "$local_dest" || rc=$?
 hpc_audit rsync_pull --host "$HPC_HOST" --target "$sub" --dry "${#DRY[@]}" --exit "$rc"
 
 # Bring the SLURM-side audit log down too (independent of the fetch above).

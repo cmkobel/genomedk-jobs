@@ -47,7 +47,7 @@ This matters most when settings auto-approve Bash (`Bash(*)`), where no permissi
 
 ## One-time setup per project
 
-1. **SSH alias with multiplexing.** Add a `Host` block to `~/.ssh/config` so one login lasts ~12 h. See `reference/ssh_setup.md` for the exact block.
+1. **SSH alias with multiplexing.** Add a `Host` block to `~/.ssh/config` so one login lasts ~12 h. See `reference/ssh_setup.md` for the exact block. This is not optional on a 2FA cluster like GenomeDK: without `ControlMaster`/`ControlPath`, every command re-prompts for the OTP (which the assistant cannot type). `hpc_login.sh` checks for it and prints a fix-it warning if it is missing.
 2. **Config.** Run `bash scripts/hpc_init.sh` from your project root — it drops an `hpc.env` (from `config/hpc.env.example`) and gitignores the wrappers' local artifacts (`.hpc_audit.log`, `.hpc_root_verified`). Then edit `hpc.env` and fill in `HPC_HOST`, `HPC_ACCOUNT`, `HPC_REMOTE_ROOT`, `HPC_PARTITION`, `HPC_MAIL_USER`, and `HPC_PUSH_PATHS`. It holds no secrets, so it is safe to commit.
 
 The wrappers locate `hpc.env` by walking up from the current directory. If you run them from elsewhere — a parent directory, or a tree with several project configs — point them at one explicitly with `-c path/to/hpc.env` (every wrapper accepts it, as does `hpc_submit.py`) or by exporting `HPC_CONFIG`.

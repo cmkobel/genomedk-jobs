@@ -45,6 +45,44 @@ hpc_load_config() {
     export HPC_HOST HPC_ACCOUNT HPC_REMOTE_ROOT HPC_LOCAL_ROOT HPC_AUDIT_LOG HPC_CODE_SUBDIR HPC_CONFIG
 }
 
+# Warn (never fail) when HPC_HOST has no SSH connection multiplexing configured.
+# `ssh -G <host>` prints the effective config; without `ControlMaster auto` and a
+# `ControlPath`, a cluster with interactive 2FA (e.g. GenomeDK) re-prompts for the
+# OTP on every ssh/rsync — and the assistant cannot type it, so push/submit/
+# status/fetch stall. This turns that confusing failure into one actionable line.
+# Returns 0 if multiplexing looks configured (or cannot be determined), 1 after
+# printing guidance if it is clearly absent. The most common trigger is simply
+# having no `Host $HPC_HOST` block in ~/.ssh/config at all.
+hpc_check_ssh_multiplexing() {
+    command -v ssh >/dev/null 2>&1 || return 0
+    local g cm cp ref
+    g="$(ssh -G "$HPC_HOST" 2>/dev/null)" || return 0   # pre-6.8 ssh lacks -G: skip
+    [ -n "$g" ] || return 0
+    cm="$(printf '%s\n' "$g" | awk 'tolower($1)=="controlmaster"{print tolower($2); exit}')"
+    cp="$(printf '%s\n' "$g" | awk 'tolower($1)=="controlpath"{print $2; exit}')"
+    case "$cm" in auto|yes) ;; *) cm=off ;; esac
+    case "$cp" in ''|none|None) cp=off ;; esac
+    [ "$cm" != off ] && [ "$cp" != off ] && return 0
+
+    ref="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/reference/ssh_setup.md"
+    cat >&2 <<EOF
+hpc: WARNING — SSH connection multiplexing is not configured for "$HPC_HOST".
+     Without it, a cluster with interactive 2FA (e.g. GenomeDK) re-prompts for
+     your OTP on every ssh/rsync, and the assistant cannot type it — so push,
+     submit, status, and fetch will stall. Most often this just means there is
+     no "Host $HPC_HOST" block in ~/.ssh/config.
+
+     Fix: add a block for "$HPC_HOST" to ~/.ssh/config containing
+         ControlMaster auto
+         ControlPath ~/.ssh/cm-%r@%h:%p
+         ControlPersist 12h
+     Copy-paste example: $ref
+
+     (If "$HPC_HOST" uses key-based or otherwise prompt-free auth, ignore this.)
+EOF
+    return 1
+}
+
 # Reject a string that contains anything outside a conservative safe set
 # (letters, digits, '.', '_', '/', '-'). Every value the skill interpolates into
 # a remote shell command passes through here so a crafted path/name cannot break

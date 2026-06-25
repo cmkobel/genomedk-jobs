@@ -15,6 +15,7 @@ if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--config" ]; then
     export HPC_CONFIG="$2"; shift 2
 fi
 hpc_load_config
+hpc_check_ssh_multiplexing || true   # warn-only; never blocks a login attempt
 
 if ssh -O check "$HPC_HOST" 2>/dev/null; then
     echo "ssh master socket to $HPC_HOST already alive."

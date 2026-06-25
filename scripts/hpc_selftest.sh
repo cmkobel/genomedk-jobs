@@ -147,6 +147,31 @@ HPC_CONFIG="$TMP/hpc.env" expect_ok "hpc_verify_root short-circuits on a matchin
     bash -c '. "$0"; hpc_load_config; hpc_verify_root' "$LIB"
 rm -f "$TMP/.hpc_root_verified"
 
+section "SSH multiplexing check (hpc_check_ssh_multiplexing)"
+# Stub `ssh -G <host>` to emit a configured vs. an unconfigured effective config,
+# so the check is exercised without touching the user's real ~/.ssh/config.
+MUXOK="$TMP/muxok"; mkdir -p "$MUXOK"
+cat > "$MUXOK/ssh" <<'SH'
+#!/bin/sh
+if [ "$1" = "-G" ]; then
+  printf 'controlmaster auto\ncontrolpath /tmp/cm-socket\ncontrolpersist 43200\n'
+fi
+exit 0
+SH
+MUXNO="$TMP/muxno"; mkdir -p "$MUXNO"
+cat > "$MUXNO/ssh" <<'SH'
+#!/bin/sh
+if [ "$1" = "-G" ]; then
+  printf 'controlmaster false\ncontrolpersist no\n'
+fi
+exit 0
+SH
+chmod +x "$MUXOK/ssh" "$MUXNO/ssh"
+expect_ok   "passes when ControlMaster+ControlPath are configured" \
+    env "PATH=$MUXOK:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash -c '. "$0"; hpc_load_config; hpc_check_ssh_multiplexing' "$LIB"
+expect_fail "warns when multiplexing is absent (no Host block)" \
+    env "PATH=$MUXNO:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash -c '. "$0"; hpc_load_config; hpc_check_ssh_multiplexing' "$LIB"
+
 section "Wrapper execution — empty-array safety (stubbed ssh/rsync)"
 # Run hpc_push.sh / hpc_fetch.sh end-to-end with ssh+rsync stubbed and WITHOUT
 # --dry-run, so the optional-arg arrays (DRY, backup) are expanded while empty.

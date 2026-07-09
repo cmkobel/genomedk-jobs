@@ -65,13 +65,21 @@ def load_config() -> dict:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, val = line.split("=", 1)
-        cfg[key.strip()] = val.strip().strip('"').strip("'")
+        key, val = key.strip(), val.strip()
+        # Remove ONE matched surrounding quote pair (same rule as
+        # hpc_parse_config in _hpc_lib.sh), so the two loaders agree.
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        cfg[key] = val
 
     for required in ("HPC_HOST", "HPC_ACCOUNT", "HPC_REMOTE_ROOT"):
         if not cfg.get(required):
             raise SystemExit(f"{required} is unset in {cfg_path}")
     if not cfg["HPC_REMOTE_ROOT"].startswith("/"):
         raise SystemExit(f"HPC_REMOTE_ROOT must be absolute: {cfg['HPC_REMOTE_ROOT']}")
+    # Normalize away trailing slash(es) so guard_under_root and the shell guard
+    # agree on the root boundary (mirrors _hpc_lib.sh).
+    cfg["HPC_REMOTE_ROOT"] = cfg["HPC_REMOTE_ROOT"].rstrip("/") or "/"
     cfg.setdefault("HPC_LOCAL_ROOT", str(Path(cfg_path).resolve().parent))
     cfg.setdefault("HPC_CODE_SUBDIR", "repo")
     cfg["_config_path"] = cfg_path
@@ -79,10 +87,12 @@ def load_config() -> dict:
 
 
 def render(tmpl: str, mapping: dict[str, str]) -> str:
-    out = tmpl
-    for key, val in mapping.items():
-        out = out.replace(f"@@{key}@@", val)
-    return out
+    """Substitute @@KEY@@ placeholders in a single pass, so a substituted value
+    that happens to contain '@@OTHER@@' is never re-expanded (an ordered chain of
+    str.replace() calls would). A callback replacement also avoids backreference
+    interpretation in the values. Unknown placeholders are left untouched."""
+    return re.sub(r"@@([A-Z_]+)@@",
+                  lambda m: mapping.get(m.group(1), m.group(0)), tmpl)
 
 
 _SAFE = re.compile(r"\A[A-Za-z0-9._/-]+\Z")

@@ -4,21 +4,28 @@
 The wrappers confine writes to HPC_REMOTE_ROOT and never delete, but an agent
 could bypass them by running raw `ssh <host> 'rm -rf ...'` or `rsync --delete`
 directly. This hook inspects each Bash command and BLOCKS (exit code 2) the
-clearly destructive ones that target the configured cluster, turning the
-safety.md rules from "the agent should" into "the harness won't let it".
+common destructive ones that target the configured cluster, catching an
+accidental footgun before it runs.
 
 Scope is deliberately narrow to avoid false positives:
   * It does nothing unless an hpc.env is found (so it only acts in projects that
     use this skill) and the command references that project's HPC_HOST.
   * It only inspects ssh/rsync/scp commands — local commands are never touched.
   * It blocks rsync --delete and a short list of high-harm remote operations
-    (recursive/forced rm, mkfs, dd of=, fork bombs, recursive chmod/chown,
-    redirects into system paths). Normal wrapper calls and reads pass through.
+    (recursive/forced rm, find -delete, shred, truncate -s0, mkfs, dd of=, fork
+    bombs, recursive chmod/chown, writes into system/device paths). Normal
+    wrapper calls and reads pass through.
 
-Enable it by adding a PreToolUse hook to settings.json (see SKILL.md /
-reference/safety.md). It is best-effort: on any internal error it fails open
-(exit 0) so a hook bug can never wedge your shell — the hardened wrappers remain
-the primary safeguard.
+This is a best-effort backstop, NOT a security boundary. It is a regex pass over
+the command string, so a determined caller can evade it — e.g. obfuscating the
+binary name (`r''m`), targeting the cluster by its real hostname instead of the
+configured HPC_HOST alias, or using an un-listed destructive verb (`mv` off the
+tree, an interpreter one-liner). It also can't reason about intent: a legitimate
+`mv`/overwrite that loses data looks benign. Treat it as a seatbelt against
+mistakes; the hardened wrappers (which confine writes and never delete) remain
+the actual safeguard. On any internal error it fails open (exit 0) so a hook bug
+can never wedge your shell. Enable it via a PreToolUse hook in settings.json
+(see SKILL.md / reference/safety.md).
 """
 from __future__ import annotations
 
@@ -36,6 +43,11 @@ RULES = [
     (r"\brm\b\s+(?:-\S*[rf]\S*\s+)+",
      "remote 'rm -r/-f' is blocked: deleting under HPC_REMOTE_ROOT throws away "
      "job checkpoints and outputs."),
+    (r"\bfind\b[^|]*\s-delete\b",
+     "find -delete recursively removes matched files; like rm under "
+     "HPC_REMOTE_ROOT it discards job checkpoints and outputs."),
+    (r"\bshred\b", "shred destroys file contents irrecoverably."),
+    (r"\btruncate\b\s+-s\s*0\b", "truncate -s 0 empties a file in place."),
     (r"\bmkfs\b", "mkfs is destructive and never appropriate from this skill."),
     (r"\bdd\b[^|]*\bof=/", "dd writing to a device/path is blocked."),
     (r":\s*\(\s*\)\s*\{", "fork-bomb pattern blocked."),
@@ -68,7 +80,10 @@ def find_host() -> str | None:
             for line in p.read_text().splitlines():
                 key, sep, val = line.strip().partition("=")
                 if sep and key.strip() == "HPC_HOST":
-                    return val.strip().strip('"').strip("'")
+                    val = val.strip()
+                    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                        val = val[1:-1]
+                    return val
         except OSError:
             continue
     return None

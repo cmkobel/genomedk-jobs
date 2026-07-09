@@ -20,11 +20,11 @@ Primary target is **GenomeDK** (Aarhus). It also works on any SLURM cluster you 
 
 `reference/safety.md` is non-negotiable, especially: all remote writes confined to `HPC_REMOTE_ROOT`; no login-node compute; never `rsync --delete`; the **human types the OTP, not you**; every action is audited. Read it before doing anything on a cluster.
 
-The wrappers enforce much of this themselves: every agent-supplied value that reaches a remote shell (job name, jobid, paths) is restricted to a safe character set so it cannot inject commands; the first push/submit verifies `HPC_REMOTE_ROOT` is owned by you; and an optional hook (below) blocks bypass attempts at the harness level.
+The wrappers enforce much of this themselves: every agent-supplied value that reaches a remote shell (job name, jobid, paths) is restricted to a safe character set so it cannot inject commands; `hpc.env` is read as inert data, never `source`-d, so a committed config can't run code locally; the first push/submit verifies `HPC_REMOTE_ROOT` is owned by you; and an optional hook (below) catches common bypass attempts at the harness level.
 
 ## Enforce the safety rules with a hook (recommended)
 
-The wrappers confine writes and never delete — but nothing stops an agent from bypassing them with a raw `ssh <host> 'rm -rf …'` or `rsync --delete`. `scripts/hpc_guard_hook.py` is a Claude Code **PreToolUse** hook that blocks those at the harness level. It is narrowly scoped: it only acts on commands that target your configured `HPC_HOST` in a project that has an `hpc.env`, so enabling it globally is a no-op everywhere else.
+The wrappers confine writes and never delete — but nothing stops an agent from bypassing them with a raw `ssh <host> 'rm -rf …'` or `rsync --delete`. `scripts/hpc_guard_hook.py` is a Claude Code **PreToolUse** hook that catches the common destructive ones at the harness level. It is narrowly scoped: it only acts on commands that target your configured `HPC_HOST` in a project that has an `hpc.env`, so enabling it globally is a no-op everywhere else. It is a best-effort seatbelt against mistakes, **not a security boundary** — it's a regex pass over the command string, so it can be evaded (obfuscated binary name, the cluster's real hostname instead of the alias, an un-listed verb like `mv`).
 
 Add this to your `settings.json` (`~/.claude/settings.json` for every project, or a project's `.claude/settings.json` for one). `~` is **not** expanded in hook commands, so use `$HOME` (or `$CLAUDE_PROJECT_DIR/.claude/skills/...` for a per-project install):
 
@@ -48,7 +48,7 @@ This matters most when settings auto-approve Bash (`Bash(*)`), where no permissi
 ## One-time setup per project
 
 1. **SSH alias with multiplexing.** Add a `Host` block to `~/.ssh/config` so one login lasts ~12 h. See `reference/ssh_setup.md` for the exact block. This is not optional on a 2FA cluster like GenomeDK: without `ControlMaster`/`ControlPath`, every command re-prompts for the OTP (which the assistant cannot type). `hpc_login.sh` checks for it and prints a fix-it warning if it is missing.
-2. **Config.** Run `bash scripts/hpc_init.sh` from your project root — it drops an `hpc.env` (from `config/hpc.env.example`) and gitignores the wrappers' local artifacts (`.hpc_audit.log`, `.hpc_root_verified`). Then edit `hpc.env` and fill in `HPC_HOST`, `HPC_ACCOUNT`, `HPC_REMOTE_ROOT`, `HPC_PARTITION`, `HPC_MAIL_USER`, and `HPC_PUSH_PATHS`. It holds no secrets, so it is safe to commit.
+2. **Config.** Run `bash scripts/hpc_init.sh` from your project root — it drops an `hpc.env` (from `config/hpc.env.example`) and gitignores the wrappers' local artifacts (`.hpc_audit.log`, `.hpc_root_verified`). Then edit `hpc.env` and fill in `HPC_HOST`, `HPC_ACCOUNT`, `HPC_REMOTE_ROOT`, `HPC_PARTITION`, `HPC_MAIL_USER`, and `HPC_PUSH_PATHS`. It holds no secrets and is read as inert data (never `source`-d), so it is safe to commit and share — values are taken literally, with no shell expansion.
 
 The wrappers locate `hpc.env` by walking up from the current directory. If you run them from elsewhere — a parent directory, or a tree with several project configs — point them at one explicitly with `-c path/to/hpc.env` (every wrapper accepts it, as does `hpc_submit.py`) or by exporting `HPC_CONFIG`.
 

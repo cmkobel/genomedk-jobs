@@ -75,6 +75,31 @@ HPC_CONFIG="$TMP/nope.env" expect_fail "dies on a missing config" \
 HPC_CONFIG="$TMP/bad_relative.env" expect_fail "rejects a relative HPC_REMOTE_ROOT" \
     bash -c '. "$0"; hpc_load_config' "$LIB"
 
+# hpc.env is meant to be committed/shared, so loading it must NOT run code.
+EVIL_MARK="$TMP/parse_pwned"
+rm -f "$EVIL_MARK"
+cat > "$TMP/inject.env" <<EOF
+HPC_HOST=selftest-host
+HPC_ACCOUNT=a
+HPC_REMOTE_ROOT=/faststorage/project/test/root
+HPC_EVIL=\$(touch $EVIL_MARK && echo gotcha)
+HPC_TICK=\`touch $EVIL_MARK\`
+EOF
+HPC_CONFIG="$TMP/inject.env" bash -c '. "$0"; hpc_load_config' "$LIB" >/dev/null 2>&1
+expect_fail "a \$(...)/backtick value does NOT execute on load (no marker)" test -f "$EVIL_MARK"
+HPC_CONFIG="$TMP/inject.env" expect_ok "...but the line still loads (value kept, literal)" \
+    bash -c '. "$0"; hpc_load_config; [ -n "$HPC_EVIL" ]' "$LIB"
+
+# A trailing slash on the root must be normalized away, or the shell prefix
+# guard would reject every valid subpath (shell vs python divergence).
+cat > "$TMP/trailing.env" <<'EOF'
+HPC_HOST=h
+HPC_ACCOUNT=a
+HPC_REMOTE_ROOT=/faststorage/project/test/root/
+EOF
+HPC_CONFIG="$TMP/trailing.env" expect_ok "normalizes a trailing slash, then accepts a subpath" \
+    bash -c '. "$0"; hpc_load_config; [ "$HPC_REMOTE_ROOT" = /faststorage/project/test/root ] && hpc_guard_remote "$HPC_REMOTE_ROOT/sub"' "$LIB"
+
 section "Remote-root guard (hpc_guard_remote)"
 ROOT=/faststorage/project/test/root
 guard() { HPC_REMOTE_ROOT="$ROOT" bash -c '. "$1"; hpc_guard_remote "$2"' _ "$LIB" "$1"; }
@@ -108,6 +133,17 @@ render_gpu="$(sub --name g --command 'echo hi' --gpus 2 --dry-run 2>/dev/null)"
 check_contains "renders --gpus when requested"   '#SBATCH --gpus 2'               "$render_gpu"
 check_absent   "omits the array block at chunks=1" '#SBATCH --array'              "$render_gpu"
 
+# Single-pass render: an earlier value containing a later key's placeholder must
+# NOT be re-expanded (an ordered chain of str.replace() would turn this into
+# 'echo RUNME').
+render_sp="$(sub --name n --command RUNME --setup 'echo @@COMMAND@@' --dry-run 2>/dev/null)"
+check_contains "render is single-pass (a value's @@COMMAND@@ stays literal)" 'echo @@COMMAND@@' "$render_sp"
+
+# Trailing-slash root is normalized on the python side too (no doubled slash).
+render_ts="$(HPC_CONFIG="$TMP/trailing.env" python3 "$SUBMIT" --name n --command 'echo hi' --dry-run 2>/dev/null)"
+check_contains "submit normalizes a trailing-slash root" '#SBATCH --output /faststorage/project/test/root/slurm_logs/%j.out' "$render_ts"
+check_absent   "...with no doubled slash"                '/root//slurm_logs'                                              "$render_ts"
+
 section "Audit logger (_hpc_log.py)"
 alog="$TMP/audit_test.log"
 expect_ok "writes a log line" env HPC_AUDIT_LOG="$alog" \
@@ -131,6 +167,9 @@ expect_block() { local d="$1"; if [ "$(hook_ec "$2")" = 2 ]; then ok "$d"; else 
 expect_allow() { local d="$1"; if [ "$(hook_ec "$2")" = 0 ]; then ok "$d"; else bad "$d"; fi; }
 expect_block "blocks rsync --delete to the host"  "rsync -az --delete ./x selftest-host:/faststorage/project/test/root/"
 expect_block "blocks 'ssh host rm -rf'"           "ssh selftest-host 'rm -rf /faststorage/project/test/root/out'"
+expect_block "blocks 'ssh host find -delete'"     "ssh selftest-host 'find /faststorage/project/test/root -name \"*.ckpt\" -delete'"
+expect_block "blocks 'ssh host shred'"            "ssh selftest-host 'shred -u /faststorage/project/test/root/out'"
+expect_block "blocks 'ssh host truncate -s 0'"    "ssh selftest-host 'truncate -s 0 /faststorage/project/test/root/db'"
 expect_block "blocks 'ssh host mkfs'"             "ssh selftest-host mkfs.ext4 /dev/sdb"
 expect_allow "allows a wrapper invocation"        "bash scripts/hpc_push.sh"
 expect_allow "allows a normal rsync push"         "rsync -azP ./src selftest-host:/faststorage/project/test/root/repo/"

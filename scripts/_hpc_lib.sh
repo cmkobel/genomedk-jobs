@@ -5,10 +5,42 @@
 
 hpc_die() { echo "hpc: $*" >&2; exit 1; }
 
-# Locate and source the project's hpc.env. Search order:
+# Parse a KEY=value config file WITHOUT sourcing it. hpc.env is meant to be
+# committed and shared between collaborators, so loading it MUST NOT run code on
+# the machine that reads it: sourcing would execute any $(...), backticks, or
+# trailing commands a mistaken or hostile committer put in a value. This reads
+# the file as inert data instead, mirroring load_config() in hpc_submit.py:
+#   - blank lines and #-comments (optionally indented) are skipped;
+#   - the first '=' splits key from value; the key must be a shell identifier;
+#   - one matched surrounding quote pair is removed from the value;
+#   - $VARs / $(...) / backticks are NOT expanded — values stay literal.
+# Each accepted key is exported so child processes (the python helpers) see it,
+# matching the previous `set -a` behavior.
+hpc_parse_config() {
+    local file="$1" line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"                                                       # tolerate CRLF
+        line="${line#"${line%%[![:space:]]*}"}"                                    # ltrim (for the comment check)
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) : ;; *) continue ;; esac
+        key="${line%%=*}"; val="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}" # trim key
+        case "$key" in [A-Za-z_]*) : ;; *) continue ;; esac                        # must start identifier-like
+        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac                           # ...and stay one (else skip)
+        val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}" # trim value
+        case "$val" in                                                             # strip one matched quote pair
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        export "$key=$val"
+    done < "$file"
+}
+
+# Locate and load the project's hpc.env. Search order:
 #   1. $HPC_CONFIG, if set.
 #   2. hpc.env or .hpc/hpc.env, walking up from $PWD to /.
-# Exports the config vars (set -a) so child processes (python helpers) see them.
+# Loaded via hpc_parse_config (never sourced), so a committed config cannot run
+# code locally; the parsed vars are exported so the python helpers see them.
 hpc_load_config() {
     local cfg="${HPC_CONFIG:-}"
     if [ -z "$cfg" ]; then
@@ -23,10 +55,7 @@ hpc_load_config() {
     [ -n "$cfg" ] && [ -f "$cfg" ] || hpc_die \
         "no config found. Set HPC_CONFIG or create hpc.env at your project root (see config/hpc.env.example)."
 
-    set -a
-    # shellcheck disable=SC1090
-    . "$cfg"
-    set +a
+    hpc_parse_config "$cfg"   # read as data, never sourced (see hpc_parse_config)
     HPC_CONFIG="$cfg"
 
     : "${HPC_HOST:?set HPC_HOST in $cfg}"
@@ -36,6 +65,12 @@ hpc_load_config() {
         /*) : ;;
         *) hpc_die "HPC_REMOTE_ROOT must be an absolute path: $HPC_REMOTE_ROOT" ;;
     esac
+    # Strip any trailing slash(es) so the prefix guard (hpc_guard_remote) and the
+    # python mirror (guard_under_root) agree on what "under the root" means — a
+    # trailing slash otherwise makes the shell glob reject every valid subpath.
+    while [ "$HPC_REMOTE_ROOT" != "${HPC_REMOTE_ROOT%/}" ] && [ -n "${HPC_REMOTE_ROOT%/}" ]; do
+        HPC_REMOTE_ROOT="${HPC_REMOTE_ROOT%/}"
+    done
     # HPC_REMOTE_ROOT is interpolated into remote shell commands all over the
     # skill, so it must contain no shell metacharacters.
     hpc_reject_unsafe "$HPC_REMOTE_ROOT" "HPC_REMOTE_ROOT"

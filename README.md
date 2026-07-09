@@ -50,12 +50,12 @@ Inside Claude Code, just describe the task ("submit an ESM-2 job to GenomeDK", "
 
 ## Safety
 
-The wrappers confine every remote write to the configured project directory, never pass `rsync --delete`, and append a JSONL line per action to `.hpc_audit.log`. The human types the OTP, never the assistant. Beyond that:
+The wrappers confine every remote write to the configured project directory, never pass `rsync --delete`, and append a JSONL line per action to `.hpc_audit.log` (an operational record of wrapper actions, not a tamper-proof audit trail). The human types the OTP, never the assistant. Beyond that:
 
-- **Injection-hardened.** Every agent-supplied value that reaches a remote shell (job name, jobid, paths) is restricted to a safe character set and quoted, so a crafted input can't break out of the remote command.
+- **Injection-hardened.** Every agent-supplied value that reaches a remote shell (job name, jobid, paths) is restricted to a safe character set and quoted, so a crafted input can't break out of the remote command. `hpc.env` is read as inert KEY=value data — never `source`-d — so a committed config can't run code on the machine that loads it.
 - **Wrong-root protection.** The first push/submit verifies over SSH that `HPC_REMOTE_ROOT` is owned by you, catching a mistyped path before it writes into another project.
 - **Preview & recover.** `--dry-run` on push/fetch previews without writing; `HPC_PUSH_BACKUP=1` keeps copies of anything an overwrite would replace.
-- **Optional enforcement hook.** `scripts/hpc_guard_hook.py` is a PreToolUse hook that blocks raw `rsync --delete` / destructive `ssh <host> …` even if the wrappers are bypassed — see SKILL.md to enable it (recommended if your settings auto-approve Bash).
+- **Optional backstop hook.** `scripts/hpc_guard_hook.py` is a PreToolUse hook that catches common destructive commands (`rsync --delete`, recursive `rm`, `find -delete`, …) targeting the cluster even if the wrappers are bypassed — a best-effort seatbelt against mistakes, not a security boundary (it's regex-based and evadable). See SKILL.md to enable it (recommended if your settings auto-approve Bash).
 
 Read `reference/safety.md` before running anything on a shared cluster.
 

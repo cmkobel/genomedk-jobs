@@ -261,6 +261,32 @@ expect_ok "hpc_push.sh honors -c <config>" \
     env "PATH=$STUB:$PATH" bash "$HERE/hpc_push.sh" -c "$TMP/hpc.env" --dry-run
 rm -f "$TMP/.hpc_root_verified"
 
+section "Wrapper rsync option-safety ('--' terminates options)"
+# A source/dest beginning with '-' must reach rsync as a PATH, never an option,
+# or the "wrappers never pass --delete" invariant leaks. The stub records rsync's
+# argv (fetch invokes rsync twice: the transfer + the audit-log merge, so append).
+ARGV="$TMP/argvstub"; mkdir -p "$ARGV"
+printf '#!/bin/sh\nexit 0\n' > "$ARGV/ssh"
+cat > "$ARGV/rsync" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$RSYNC_ARGV_OUT"
+exit 0
+SH
+chmod +x "$ARGV/ssh" "$ARGV/rsync"
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+
+pout="$TMP/push_argv.txt"; : > "$pout"
+env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$pout" \
+    bash "$HERE/hpc_push.sh" --delete somedest >/dev/null 2>&1
+check_contains "push sends a --delete-named SOURCE as a path, not an option" '-- --delete' "$(cat "$pout")"
+
+fout="$TMP/fetch_argv.txt"; : > "$fout"
+env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$fout" \
+    bash "$HERE/hpc_fetch.sh" results ./out >/dev/null 2>&1
+check_contains "fetch terminates rsync options with '--'" \
+    '-- selftest-host:/faststorage/project/test/root/results' "$(cat "$fout")"
+rm -f "$TMP/.hpc_root_verified"
+
 section "Job watcher (hpc_watch.sh)"
 WATCH="$HERE/hpc_watch.sh"
 # Stub ssh so the watcher sees the job already gone (squeue empty on the first

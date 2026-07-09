@@ -290,7 +290,13 @@ def main() -> None:
     print(f"\nSubmitted jobid={jobid}")
     print(f"Status: bash {here}/hpc_status.sh {jobid}   # one-shot squeue/sacct")
     print(f"Watch:  bash {here}/hpc_watch.sh {jobid}    # poll to completion (run in background)")
-    print(f"Logs:   ssh {host} tail -f {root}/slurm_logs/{jobid}.out")
+    if args.chunks > 1:
+        # An array job writes one %j.out per task, and %j is each task's own
+        # (distinct) jobid — never the base id printed above — so point at the
+        # directory rather than a single wrong filename.
+        print(f"Logs:   ssh {host} ls -t {root}/slurm_logs/   # one .out per array task")
+    else:
+        print(f"Logs:   ssh {host} tail -f {root}/slurm_logs/{jobid}.out")
 
 
 if __name__ == "__main__":

@@ -57,7 +57,10 @@ if [ "${#DRY[@]}" -eq 0 ]; then
     ssh "$HPC_HOST" "mkdir -p '$remote'"
 fi
 rc=0
-rsync -azP ${DRY[@]+"${DRY[@]}"} ${backup[@]+"${backup[@]}"} "${EXCLUDES[@]}" "${locals[@]}" "$HPC_HOST:$remote/" || rc=$?
+# `--` terminates rsync options, so a source path beginning with '-' (e.g. a file
+# literally named --delete, or a glob that expands to one) is treated as a PATH,
+# never an option — keeping the "never --delete" invariant intact for odd paths.
+rsync -azP ${DRY[@]+"${DRY[@]}"} ${backup[@]+"${backup[@]}"} "${EXCLUDES[@]}" -- "${locals[@]}" "$HPC_HOST:$remote/" || rc=$?
 hpc_audit rsync_push --host "$HPC_HOST" --target "$remote/" --dry "${#DRY[@]}" --exit "$rc"
 [ "$rc" -eq 0 ] || hpc_die "rsync push failed (rc=$rc)"
 echo "pushed -> $HPC_HOST:$remote/"

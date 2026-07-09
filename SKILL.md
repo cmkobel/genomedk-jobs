@@ -10,7 +10,7 @@ description: >-
 
 # genomedk-jobs
 
-Offload heavy compute from a laptop to a SLURM cluster. The laptop stays the source of truth for code; the cluster only runs jobs. Five small wrappers cover the whole loop: log in, push inputs, submit, watch the queue, fetch outputs. Everything project-specific lives in one config file (`hpc.env`), so the same skill works in any project once that file is filled in.
+Offload heavy compute from a laptop to a SLURM cluster. The laptop stays the source of truth for code; the cluster only runs jobs. Small wrappers cover the whole loop: log in, push inputs, submit, monitor (a one-shot status check or a watch-to-completion poller), fetch outputs. Everything project-specific lives in one config file (`hpc.env`), so the same skill works in any project once that file is filled in.
 
 Primary target is **GenomeDK** (Aarhus). It also works on any SLURM cluster you can reach with a multiplexed SSH alias.
 
@@ -76,6 +76,7 @@ python $S/hpc_submit.py --name myjob \
     --command "pixi run -e hpc python work.py" \
     --time 12:00:00 --gpus 1 --cpus 8 --mem 16g
 bash $S/hpc_status.sh                      # squeue for you (read-only); pass a jobid (falls back to sacct once it finishes)
+bash $S/hpc_watch.sh <jobid>               # poll that jobid until it finishes, then report the final state (backgroundable)
 bash $S/hpc_fetch.sh results/myjob         # rsync a remote subpath back down
 ```
 
@@ -84,6 +85,7 @@ bash $S/hpc_fetch.sh results/myjob         # rsync a remote subpath back down
 - **Long runs: `--chunks N`.** Emits `#SBATCH --array=1-N%1` so N tasks queue but only one runs at a time. Each task resumes from your job's own checkpoint, so a multi-hour run auto-chains past a partition's walltime cap without manual resubmits. This only helps if your command itself resumes from a checkpoint on restart.
 - **Partitions.** `--partition` (or `HPC_PARTITION`) takes a single name or a comma-list; SLURM picks the first free one and the walltime cap becomes the most restrictive partition in the list. On GenomeDK the GPU partitions are `gpu-l40s`/`gpu-short` (L40S, 48 GB) and `gpu-h200` (H200, 141 GB); run `gnodes` on the login node for the live list and per-node limits.
 - **Status detail.** `hpc_status.sh` runs `squeue` (portable across clusters); given a jobid it falls back to `sacct` for the final state once the job has left the queue, so a finished job reports `COMPLETED`/`FAILED` + exit code instead of an empty table. On GenomeDK, `ssh $HPC_HOST jobinfo <jobid>` reports more — memory use and live GPU utilization — which is the quickest way to confirm a GPU job is clearing the 75%-after-2h auto-cancel threshold (see safety rule 3).
+- **Watch to completion.** `hpc_status.sh` is a single snapshot; `hpc_watch.sh <jobid>` is the loop — it polls until the job leaves the queue, then reports the final `sacct` state and exit code (exit `0` COMPLETED, `1` other terminal state, `2` gave up / socket lost / no accounting). It `sleep`s **locally** between short `squeue` probes and uses `ssh -o BatchMode=yes`, so it never blocks inside ssh (safety rule 8) and fails fast with a "run hpc_login.sh" message if the socket expires rather than hanging on an OTP prompt. **Run it as a background task** (Claude Code `run_in_background`) so the session is notified when the job finishes; it does not fetch outputs — decide that from the reported state. Tune with `-i <seconds>` (poll interval, default 60, min 5) and `-w <seconds>` (give up after; default 0 = never). There is no persistent/cross-session daemon: the watcher lives only as long as the process (or the session running it), so for a truly fire-and-forget signal, also rely on the SLURM END/FAIL email (`HPC_MAIL_USER`).
 - **Push excludes.** `hpc_push.sh` skips `.git/`, `__pycache__/`, `.pixi/`, `.ipynb_checkpoints/`, `*.ipynb`, and `.DS_Store`. Note that notebooks (`*.ipynb`) are excluded by default; pass a notebook explicitly as a `<local>` argument if a job needs one.
 - **Preview & overwrites.** `bash hpc_push.sh --dry-run` (and `hpc_fetch.sh --dry-run`) previews the transfer without writing anything. Push never deletes, but it does *overwrite* a remote file whose local copy differs — set `HPC_PUSH_BACKUP=1` to keep overwritten copies under `$HPC_REMOTE_ROOT/.hpc_backups/<timestamp>`. The first push/submit also confirms over SSH that `HPC_REMOTE_ROOT` is owned by you and refuses otherwise (override with `HPC_ALLOW_UNOWNED_ROOT=1` for a shared dir); the result is cached in `.hpc_root_verified` (gitignore it alongside `.hpc_audit.log`).
 
@@ -131,6 +133,7 @@ genomedk-jobs/
 │   ├── hpc_init.sh             # scaffold hpc.env + .gitignore in a new project
 │   ├── hpc_login.sh            # warm the SSH ControlMaster socket
 │   ├── hpc_status.sh           # squeue, with sacct fallback for finished jobs (read-only)
+│   ├── hpc_watch.sh            # poll a jobid to completion, report final state (read-only, backgroundable)
 │   ├── hpc_push.sh             # rsync inputs/code up (never --delete)
 │   ├── hpc_submit.py           # render template + sbatch + capture jobid
 │   ├── hpc_fetch.sh            # rsync outputs down (never --delete)

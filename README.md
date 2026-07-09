@@ -1,6 +1,6 @@
 # genomedk-jobs
 
-A [Claude Code](https://claude.com/claude-code) skill for offloading heavy compute from a laptop to a SLURM cluster. The laptop stays the source of truth for code; the cluster only runs jobs. Five small wrappers cover the whole loop: log in, push inputs, submit, watch the queue, fetch outputs. Everything project-specific lives in one config file, so the same skill works in any project.
+A [Claude Code](https://claude.com/claude-code) skill for offloading heavy compute from a laptop to a SLURM cluster. The laptop stays the source of truth for code; the cluster only runs jobs. Small wrappers cover the whole loop: log in, push inputs, submit, monitor (a one-shot status check or a watch-to-completion poller), fetch outputs. Everything project-specific lives in one config file, so the same skill works in any project.
 
 Built for **GenomeDK** (Aarhus), but works on any SLURM cluster reachable through a multiplexed SSH alias.
 
@@ -33,6 +33,7 @@ bash   $S/hpc_push.sh                                # rsync inputs up
 python $S/hpc_submit.py --name myjob --gpus 1 --time 12:00:00 \
        --command "pixi run -e hpc python work.py"    # render + sbatch
 bash   $S/hpc_status.sh                              # squeue (read-only)
+bash   $S/hpc_watch.sh <jobid>                       # poll to completion, report final state (backgroundable)
 bash   $S/hpc_fetch.sh results/myjob                 # rsync outputs back
 ```
 

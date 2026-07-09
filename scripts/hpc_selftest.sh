@@ -230,6 +230,50 @@ expect_ok "hpc_push.sh honors -c <config>" \
     env "PATH=$STUB:$PATH" bash "$HERE/hpc_push.sh" -c "$TMP/hpc.env" --dry-run
 rm -f "$TMP/.hpc_root_verified"
 
+section "Job watcher (hpc_watch.sh)"
+WATCH="$HERE/hpc_watch.sh"
+# Stub ssh so the watcher sees the job already gone (squeue empty on the first
+# probe => no sleep), then sacct reports a terminal state. The stub distinguishes
+# calls by their command string:
+#   -O check            -> master socket alive
+#   ...State,ExitCode   -> the parseable verdict query
+#   squeue              -> empty (job left the queue)
+#   sacct (pretty)      -> one human-readable row
+mk_watch_stub() {  # $1 dir  $2 final-state  $3 exit-code
+    mkdir -p "$1"
+    cat > "$1/ssh" <<SH
+#!/bin/sh
+case "\$*" in
+  *"-O check"*)       exit 0 ;;
+  *State,ExitCode*)   echo "$2|$3:0"; exit 0 ;;
+  *squeue*)           exit 0 ;;
+  *sacct*)            echo "        123  job  $2  00:01  1M  1G  $3:0"; exit 0 ;;
+  *)                  exit 0 ;;
+esac
+SH
+    chmod +x "$1/ssh"
+}
+mk_watch_stub "$TMP/watch_ok"   COMPLETED 0
+mk_watch_stub "$TMP/watch_fail" FAILED    1
+
+w_ok="$(env "PATH=$TMP/watch_ok:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$WATCH" -i 5 123 2>&1)"; w_ok_rc=$?
+check_contains "watch reports a COMPLETED job" "COMPLETED" "$w_ok"
+if [ "$w_ok_rc" -eq 0 ]; then ok "watch exits 0 on COMPLETED"; else bad "watch exits 0 on COMPLETED (got $w_ok_rc)"; fi
+
+w_bad="$(env "PATH=$TMP/watch_fail:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$WATCH" -i 5 123 2>&1)"; w_bad_rc=$?
+check_contains "watch reports a FAILED job" "FAILED" "$w_bad"
+if [ "$w_bad_rc" -eq 1 ]; then ok "watch exits 1 on a non-success terminal state"; else bad "watch exits 1 on a non-success terminal state (got $w_bad_rc)"; fi
+
+expect_fail "watch rejects a non-numeric jobid (before any ssh)" \
+    env "PATH=$TMP/watch_ok:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$WATCH" 'abc; rm -rf /'
+expect_fail "watch rejects a sub-5s interval" \
+    env "PATH=$TMP/watch_ok:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$WATCH" -i 1 123
+
+# A dead socket (both `-O check` and a batch probe fail) must abort fast, not hang.
+mkdir -p "$TMP/watch_down"; printf '#!/bin/sh\nexit 255\n' > "$TMP/watch_down/ssh"; chmod +x "$TMP/watch_down/ssh"
+expect_fail "watch refuses to start with no live SSH socket" \
+    env "PATH=$TMP/watch_down:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$WATCH" -i 5 123
+
 if [ "$ONLINE" = 1 ]; then
     section "Online checks (read-only; uses your real hpc.env)"
     unset HPC_CONFIG

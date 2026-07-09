@@ -267,8 +267,10 @@ def main() -> None:
         sys.stderr.write(proc.stderr)
         raise SystemExit(f"sbatch failed (rc={proc.returncode})")
 
+    here = Path(__file__).resolve().parent
     print(f"\nSubmitted jobid={jobid}")
-    print(f"Watch:  ssh {host} squeue -j {jobid}")
+    print(f"Status: bash {here}/hpc_status.sh {jobid}   # one-shot squeue/sacct")
+    print(f"Watch:  bash {here}/hpc_watch.sh {jobid}    # poll to completion (run in background)")
     print(f"Logs:   ssh {host} tail -f {root}/slurm_logs/{jobid}.out")
 
 

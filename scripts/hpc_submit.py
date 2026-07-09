@@ -118,6 +118,23 @@ def guard_under_root(path: str, root: str, what: str) -> str:
     return norm
 
 
+def require_socket(host: str) -> None:
+    """Confirm a prompt-free SSH connection to `host` before any remote op, so
+    submission fails fast with guidance instead of hanging on an OTP prompt the
+    assistant cannot answer. Mirrors hpc_require_socket in _hpc_lib.sh: prefer the
+    multiplexed master socket, fall back to a BatchMode probe for key auth."""
+    check = subprocess.run(["ssh", "-O", "check", host],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if check.returncode == 0:
+        return
+    probe = subprocess.run(["ssh", "-o", "BatchMode=yes", host, "true"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if probe.returncode == 0:
+        return
+    raise SystemExit(f"no live SSH socket to {host} — run 'bash hpc_login.sh' "
+                     "first (you type the OTP), then retry.")
+
+
 def verify_root(host: str, root: str, local_root: str) -> None:
     """Confirm HPC_REMOTE_ROOT is owned by us before writing, so a mistyped config
     can't submit into another project. Honors the same marker + override as
@@ -242,7 +259,9 @@ def main() -> None:
         print(rendered)
         return
 
-    # Confirm the root is really ours before writing anything to it.
+    # Confirm the socket is up before any network op, so we never hang on a
+    # prompt; then confirm the root is really ours before writing anything to it.
+    require_socket(host)
     verify_root(host, root, cfg["HPC_LOCAL_ROOT"])
 
     remote_path = f"{root}/slurm_logs/{args.name}.slurm"

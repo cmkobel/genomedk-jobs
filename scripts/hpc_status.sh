@@ -11,6 +11,7 @@ if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--config" ]; then
     export HPC_CONFIG="$2"; shift 2
 fi
 hpc_load_config
+hpc_require_socket   # fail fast if the socket is down, rather than prompting for the OTP
 
 fmt='%.10i %.24j %.12P %.8T %.10M %.10L %R'
 if [ "$#" -ge 1 ]; then

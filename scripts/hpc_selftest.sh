@@ -211,6 +211,37 @@ expect_ok   "passes when ControlMaster+ControlPath are configured" \
 expect_fail "warns when multiplexing is absent (no Host block)" \
     env "PATH=$MUXNO:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash -c '. "$0"; hpc_load_config; hpc_check_ssh_multiplexing' "$LIB"
 
+section "SSH socket preflight (hpc_require_socket)"
+# Stub ssh three ways: a live master socket, a dead one (every probe fails), and
+# a host with no master but working prompt-free (key) auth.
+SOCKUP="$TMP/sockup";   mkdir -p "$SOCKUP";   printf '#!/bin/sh\nexit 0\n'   > "$SOCKUP/ssh";   chmod +x "$SOCKUP/ssh"
+SOCKDOWN="$TMP/sockdn"; mkdir -p "$SOCKDOWN"; printf '#!/bin/sh\nexit 255\n' > "$SOCKDOWN/ssh"; chmod +x "$SOCKDOWN/ssh"
+SOCKKEY="$TMP/sockkey"; mkdir -p "$SOCKKEY"
+cat > "$SOCKKEY/ssh" <<'SH'
+#!/bin/sh
+case "$*" in
+  *"-O check"*) exit 255 ;;   # no master socket configured...
+  *)            exit 0 ;;     # ...but a direct (key-auth) connection works
+esac
+SH
+chmod +x "$SOCKKEY/ssh"
+req() { env "PATH=$1:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash -c '. "$0"; hpc_load_config; hpc_require_socket' "$LIB"; }
+expect_ok   "passes when the master socket is alive"                req "$SOCKUP"
+expect_ok   "passes via BatchMode fallback (prompt-free key auth)"  req "$SOCKKEY"
+expect_fail "dies when no socket and no prompt-free auth"           req "$SOCKDOWN"
+# Every network-touching wrapper must abort fast on a dead socket (never prompt).
+expect_fail "hpc_status.sh aborts when the socket is down" \
+    env "PATH=$SOCKDOWN:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_status.sh"
+expect_fail "hpc_push.sh aborts when the socket is down" \
+    env "PATH=$SOCKDOWN:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_push.sh"
+expect_fail "hpc_fetch.sh aborts when the socket is down" \
+    env "PATH=$SOCKDOWN:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_fetch.sh" repo/results
+expect_fail "hpc_submit.py aborts when the socket is down" \
+    env "PATH=$SOCKDOWN:$PATH" "HPC_CONFIG=$TMP/hpc.env" python3 "$SUBMIT" --name n --command 'echo hi'
+# ...but a dry-run submit stays fully offline (no socket needed).
+expect_ok "hpc_submit.py --dry-run needs no socket" \
+    env "PATH=$SOCKDOWN:$PATH" "HPC_CONFIG=$TMP/hpc.env" python3 "$SUBMIT" --name n --command 'echo hi' --dry-run
+
 section "Wrapper execution — empty-array safety (stubbed ssh/rsync)"
 # Run hpc_push.sh / hpc_fetch.sh end-to-end with ssh+rsync stubbed and WITHOUT
 # --dry-run, so the optional-arg arrays (DRY, backup) are expanded while empty.

@@ -118,6 +118,20 @@ EOF
     return 1
 }
 
+# Confirm there is a usable, PROMPT-FREE SSH connection to HPC_HOST before doing
+# any remote work, so a wrapper fails fast with actionable guidance instead of
+# hanging on an OTP prompt the assistant cannot answer. Prefer the multiplexed
+# master socket (`ssh -O check`); fall back to a BatchMode probe for prompt-free
+# (key) auth. It does NOT open a socket — that is hpc_login.sh's job, which is
+# why hpc_login.sh must not call this. Call it right after hpc_load_config in
+# every wrapper that touches the network (all but hpc_login.sh).
+hpc_require_socket() {
+    command -v ssh >/dev/null 2>&1 || return 0   # no ssh at all: let the real call fail plainly
+    if ssh -O check "$HPC_HOST" >/dev/null 2>&1; then return 0; fi
+    if ssh -o BatchMode=yes "$HPC_HOST" true >/dev/null 2>&1; then return 0; fi
+    hpc_die "no live SSH socket to $HPC_HOST — run 'bash hpc_login.sh' first (you type the OTP), then retry."
+}
+
 # Reject a string that contains anything outside a conservative safe set
 # (letters, digits, '.', '_', '/', '-'). Every value the skill interpolates into
 # a remote shell command passes through here so a crafted path/name cannot break

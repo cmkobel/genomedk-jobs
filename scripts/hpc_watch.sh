@@ -59,13 +59,9 @@ hpc_load_config
 
 # Reuse the multiplexed session; never open a new connection that would prompt.
 SSH=(ssh -o BatchMode=yes "$HPC_HOST")
-# Preflight: confirm we can reach the host without a prompt. Prefer the master
-# socket check; fall back to a batch-mode probe for prompt-free (key) auth.
-if ! ssh -O check "$HPC_HOST" >/dev/null 2>&1; then
-    if ! "${SSH[@]}" true >/dev/null 2>&1; then
-        hpc_die "cannot reach $HPC_HOST without a prompt — run 'bash hpc_login.sh' first (you type the OTP), then start the watch."
-    fi
-fi
+# Preflight: confirm we can reach the host without a prompt (shared with the
+# other wrappers), so the watcher never starts against a dead socket.
+hpc_require_socket
 
 hpc_audit watch_start --host "$HPC_HOST" --jobid "$jobid" --interval "$interval"
 

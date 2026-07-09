@@ -19,6 +19,7 @@ if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--config" ]; then
     export HPC_CONFIG="$2"; shift 2
 fi
 hpc_load_config
+hpc_require_socket   # fail fast if the socket is down (rsync -n still connects), rather than prompting
 
 DRY=()
 if [ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "-n" ]; then

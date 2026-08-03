@@ -29,8 +29,10 @@ EXCLUDES=(--exclude=.git/ --exclude=__pycache__/ --exclude=.pixi/
           --exclude=.ipynb_checkpoints/ --exclude='*.ipynb' --exclude=.DS_Store)
 
 locals=()
+from_config=0
 if [ "$#" -eq 0 ]; then
     : "${HPC_PUSH_PATHS:?no args given and HPC_PUSH_PATHS is unset}"
+    from_config=1
     read -r -a rels <<< "$HPC_PUSH_PATHS"
     for p in ${rels[@]+"${rels[@]}"}; do locals+=("$HPC_LOCAL_ROOT/$p"); done
     dest="$HPC_CODE_SUBDIR"
@@ -39,6 +41,38 @@ elif [ "$#" -eq 1 ]; then
 else
     dest="${*: -1}"
     locals=("${@:1:$#-1}")
+fi
+
+# Preflight: every local source must exist. Left to rsync, a missing path is
+# reported as exit 23 *after* the surviving paths have already transferred — so
+# the wrapper would abort with "rsync push failed" on a push that in fact partly
+# landed, and a later submit would run against half-synced code. Checking first
+# makes it all-or-nothing with one actionable message.
+#
+# It doubles as the check for a misplaced config: HPC_PUSH_PATHS resolves against
+# HPC_LOCAL_ROOT (the directory holding hpc.env unless overridden), so an hpc.env
+# sitting somewhere other than the local project root shows up here as "every
+# path is missing" rather than as a silently wrong transfer.
+missing=()
+for p in ${locals[@]+"${locals[@]}"}; do [ -e "$p" ] || missing+=("$p"); done
+if [ "${#missing[@]}" -ne 0 ] && [ "${HPC_PUSH_ALLOW_MISSING:-0}" != 1 ]; then
+    {
+        echo "hpc: refusing to push — local path(s) do not exist:"
+        for p in ${missing[@]+"${missing[@]}"}; do echo "         $p"; done
+        if [ "$from_config" = 1 ]; then
+            echo "     HPC_PUSH_PATHS is resolved against the local root:"
+            echo "         local root : $HPC_LOCAL_ROOT"
+            echo "         config     : ${HPC_CONFIG:-?}"
+            echo "         paths      : $HPC_PUSH_PATHS"
+            echo "     If the local root is wrong, move hpc.env to your project root or set"
+            echo "     HPC_LOCAL_ROOT (in hpc.env, or in the environment) to point at it."
+            echo "     If a listed file is simply not generated yet (e.g. pixi.lock — run"
+            echo "     'pixi lock'), create it or drop it from HPC_PUSH_PATHS."
+        fi
+        echo "     To push the paths that do exist anyway: HPC_PUSH_ALLOW_MISSING=1"
+    } >&2
+    hpc_audit rsync_push --host "$HPC_HOST" --target "(preflight)" --dry "${#DRY[@]}" --exit 1
+    exit 1
 fi
 
 remote="$HPC_REMOTE_ROOT/$dest"
@@ -63,4 +97,10 @@ rc=0
 rsync -azP ${DRY[@]+"${DRY[@]}"} ${backup[@]+"${backup[@]}"} "${EXCLUDES[@]}" -- "${locals[@]}" "$HPC_HOST:$remote/" || rc=$?
 hpc_audit rsync_push --host "$HPC_HOST" --target "$remote/" --dry "${#DRY[@]}" --exit "$rc"
 [ "$rc" -eq 0 ] || hpc_die "rsync push failed (rc=$rc)"
-echo "pushed -> $HPC_HOST:$remote/"
+# Name the local root, not just the remote target: it is the one input to a push
+# that is inferred rather than given, so showing it makes a wrong one obvious.
+if [ "$from_config" = 1 ]; then
+    echo "pushed $HPC_LOCAL_ROOT -> $HPC_HOST:$remote/"
+else
+    echo "pushed -> $HPC_HOST:$remote/"
+fi

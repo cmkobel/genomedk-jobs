@@ -40,6 +40,17 @@ expect_fail() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (expe
 check_contains() { if printf '%s' "$3" | grep -qF -- "$2"; then ok "$1"; else bad "$1"; fi; }
 check_absent()   { if printf '%s' "$3" | grep -qF -- "$2"; then bad "$1"; else ok "$1"; fi; }
 
+# --- hermeticity -------------------------------------------------------------
+# Clear any HPC_* variable inherited from the caller. The fixtures below are
+# meant to be the only configuration in play, and a real project's exported
+# HPC_LOCAL_ROOT / HPC_CONFIG / HPC_PUSH_BACKUP would silently retarget them —
+# e.g. resolving the fixture's push paths and .hpc_root_verified outside $TMP,
+# failing checks that have nothing to do with the caller's project. Every check
+# passes what it needs explicitly (via `env HPC_...=` or -c), and the --online
+# section rediscovers the real hpc.env by walking up from $PWD, so none of them
+# are needed here.
+for v in $(env | sed -n 's/^\(HPC_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+
 # --- a throwaway project + config so nothing real is touched -----------------
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -60,6 +71,12 @@ HPC_HOST=h
 HPC_ACCOUNT=a
 HPC_REMOTE_ROOT=relative/path
 EOF
+# The HPC_PUSH_PATHS above must actually exist, or hpc_push.sh's preflight
+# (correctly) refuses to push. Creating them keeps the wrapper-execution checks
+# exercising a realistic transfer rather than an all-paths-missing abort.
+mkdir -p "$TMP/src" "$TMP/scripts"
+: > "$TMP/src/mod.py"
+: > "$TMP/scripts/run.py"
 
 section "Syntax"
 for f in "$HERE"/*.sh; do expect_ok "bash -n $(basename "$f")" bash -n "$f"; done
@@ -259,6 +276,33 @@ expect_ok "hpc_fetch.sh runs end-to-end (no --dry-run) under bash $BASH_VERSION"
     env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_fetch.sh" repo/results
 expect_ok "hpc_push.sh honors -c <config>" \
     env "PATH=$STUB:$PATH" bash "$HERE/hpc_push.sh" -c "$TMP/hpc.env" --dry-run
+
+# Missing-source preflight. rsync alone reports a missing path as exit 23 only
+# AFTER transferring the paths that do exist, so the push must be refused up
+# front (all-or-nothing) instead of partially landing and then reporting failure.
+cat > "$TMP/missing.env" <<EOF
+HPC_HOST=selftest-host
+HPC_ACCOUNT=test_account
+HPC_REMOTE_ROOT=/faststorage/project/test/root
+HPC_CODE_SUBDIR=repo
+HPC_PUSH_PATHS="src scripts nope.lock"
+HPC_LOCAL_ROOT=$TMP
+HPC_AUDIT_LOG=$TMP/.hpc_audit.log
+EOF
+mres="$(env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/missing.env" \
+    bash "$HERE/hpc_push.sh" 2>&1 || true)"
+expect_fail "push refuses when an HPC_PUSH_PATHS entry is missing" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/missing.env" bash "$HERE/hpc_push.sh"
+check_contains "...names the missing path" "nope.lock" "$mres"
+check_contains "...names the resolved local root (the usual root cause)" \
+    "local root : $TMP" "$mres"
+check_contains "...offers the override" "HPC_PUSH_ALLOW_MISSING=1" "$mres"
+expect_ok "HPC_PUSH_ALLOW_MISSING=1 pushes the paths that do exist" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/missing.env" "HPC_PUSH_ALLOW_MISSING=1" \
+    bash "$HERE/hpc_push.sh"
+expect_fail "push refuses an explicitly named nonexistent local path" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" \
+    bash "$HERE/hpc_push.sh" "$TMP/definitely_absent" somedest
 rm -f "$TMP/.hpc_root_verified"
 
 section "Wrapper rsync option-safety ('--' terminates options)"
@@ -276,8 +320,12 @@ chmod +x "$ARGV/ssh" "$ARGV/rsync"
 printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
 
 pout="$TMP/push_argv.txt"; : > "$pout"
-env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$pout" \
-    bash "$HERE/hpc_push.sh" --delete somedest >/dev/null 2>&1
+# The source must really exist, else the missing-source preflight (correctly)
+# refuses the push before rsync is ever reached. Creating an actual file named
+# '--delete' and pushing it from that directory is the true scenario anyway.
+touch -- "$TMP/--delete"
+( cd "$TMP" && env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$pout" \
+    bash "$HERE/hpc_push.sh" --delete somedest ) >/dev/null 2>&1
 check_contains "push sends a --delete-named SOURCE as a path, not an option" '-- --delete' "$(cat "$pout")"
 
 fout="$TMP/fetch_argv.txt"; : > "$fout"

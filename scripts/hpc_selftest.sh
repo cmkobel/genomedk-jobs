@@ -40,6 +40,17 @@ expect_fail() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (expe
 check_contains() { if printf '%s' "$3" | grep -qF -- "$2"; then ok "$1"; else bad "$1"; fi; }
 check_absent()   { if printf '%s' "$3" | grep -qF -- "$2"; then bad "$1"; else ok "$1"; fi; }
 
+# --- hermeticity -------------------------------------------------------------
+# Clear any HPC_* variable inherited from the caller. The fixtures below are
+# meant to be the only configuration in play, and a real project's exported
+# HPC_LOCAL_ROOT / HPC_CONFIG / HPC_PUSH_BACKUP would silently retarget them —
+# e.g. resolving the fixture's push paths and .hpc_root_verified outside $TMP,
+# failing checks that have nothing to do with the caller's project. Every check
+# passes what it needs explicitly (via `env HPC_...=` or -c), and the --online
+# section rediscovers the real hpc.env by walking up from $PWD, so none of them
+# are needed here.
+for v in $(env | sed -n 's/^\(HPC_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+
 # --- a throwaway project + config so nothing real is touched -----------------
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -60,6 +71,19 @@ HPC_HOST=h
 HPC_ACCOUNT=a
 HPC_REMOTE_ROOT=relative/path
 EOF
+# The HPC_PUSH_PATHS above must actually exist, or hpc_push.sh's preflight
+# (correctly) refuses to push. Creating them keeps the wrapper-execution checks
+# exercising a realistic transfer rather than an all-paths-missing abort.
+mkdir -p "$TMP/src" "$TMP/scripts"
+: > "$TMP/src/mod.py"
+: > "$TMP/scripts/run.py"
+# A NESTED source, for the push path-resolution checks below: rsync strips the
+# directory component by default, and that only diverges from the caller's
+# likely intent when the source is nested (for a top-level path the basename IS
+# the relative path, which is why "src scripts" above never shows it).
+mkdir -p "$TMP/docs/2026-08-24_foo" "$TMP/conf"
+: > "$TMP/docs/2026-08-24_foo/note.md"
+: > "$TMP/conf/params.yaml"
 
 section "Syntax"
 for f in "$HERE"/*.sh; do expect_ok "bash -n $(basename "$f")" bash -n "$f"; done
@@ -259,6 +283,33 @@ expect_ok "hpc_fetch.sh runs end-to-end (no --dry-run) under bash $BASH_VERSION"
     env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_fetch.sh" repo/results
 expect_ok "hpc_push.sh honors -c <config>" \
     env "PATH=$STUB:$PATH" bash "$HERE/hpc_push.sh" -c "$TMP/hpc.env" --dry-run
+
+# Missing-source preflight. rsync alone reports a missing path as exit 23 only
+# AFTER transferring the paths that do exist, so the push must be refused up
+# front (all-or-nothing) instead of partially landing and then reporting failure.
+cat > "$TMP/missing.env" <<EOF
+HPC_HOST=selftest-host
+HPC_ACCOUNT=test_account
+HPC_REMOTE_ROOT=/faststorage/project/test/root
+HPC_CODE_SUBDIR=repo
+HPC_PUSH_PATHS="src scripts nope.lock"
+HPC_LOCAL_ROOT=$TMP
+HPC_AUDIT_LOG=$TMP/.hpc_audit.log
+EOF
+mres="$(env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/missing.env" \
+    bash "$HERE/hpc_push.sh" 2>&1 || true)"
+expect_fail "push refuses when an HPC_PUSH_PATHS entry is missing" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/missing.env" bash "$HERE/hpc_push.sh"
+check_contains "...names the missing path" "nope.lock" "$mres"
+check_contains "...names the resolved local root (the usual root cause)" \
+    "local root : $TMP" "$mres"
+check_contains "...offers the override" "HPC_PUSH_ALLOW_MISSING=1" "$mres"
+expect_ok "HPC_PUSH_ALLOW_MISSING=1 pushes the paths that do exist" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/missing.env" "HPC_PUSH_ALLOW_MISSING=1" \
+    bash "$HERE/hpc_push.sh"
+expect_fail "push refuses an explicitly named nonexistent local path" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" \
+    bash "$HERE/hpc_push.sh" "$TMP/definitely_absent" somedest
 rm -f "$TMP/.hpc_root_verified"
 
 section "Wrapper rsync option-safety ('--' terminates options)"
@@ -276,8 +327,12 @@ chmod +x "$ARGV/ssh" "$ARGV/rsync"
 printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
 
 pout="$TMP/push_argv.txt"; : > "$pout"
-env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$pout" \
-    bash "$HERE/hpc_push.sh" --delete somedest >/dev/null 2>&1
+# The source must really exist, else the missing-source preflight (correctly)
+# refuses the push before rsync is ever reached. Creating an actual file named
+# '--delete' and pushing it from that directory is the true scenario anyway.
+touch -- "$TMP/--delete"
+( cd "$TMP" && env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$pout" \
+    bash "$HERE/hpc_push.sh" --delete somedest ) >/dev/null 2>&1
 check_contains "push sends a --delete-named SOURCE as a path, not an option" '-- --delete' "$(cat "$pout")"
 
 fout="$TMP/fetch_argv.txt"; : > "$fout"
@@ -285,6 +340,196 @@ env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$fout" \
     bash "$HERE/hpc_fetch.sh" results ./out >/dev/null 2>&1
 check_contains "fetch terminates rsync options with '--'" \
     '-- selftest-host:/faststorage/project/test/root/results' "$(cat "$fout")"
+rm -f "$TMP/.hpc_root_verified"
+
+section "Push path resolution (basename default vs --relative)"
+# rsync strips a source's directory component, so `push docs/foo repo` lands at
+# repo/foo, not repo/docs/foo. That default is kept (HPC_PUSH_PATHS and existing
+# callers depend on it), so the guarantee under test is that it is never SILENT:
+# every push prints the resolved local -> remote-absolute mapping, and a dropped
+# directory component is warned about at push time — not discovered later as a
+# FileNotFoundError inside a job that already queued.
+PMAP="$TMP/pmapstub"; mkdir -p "$PMAP"
+printf '#!/bin/sh\nexit 0\n' > "$PMAP/ssh"
+cat > "$PMAP/rsync" <<'SH'
+#!/bin/sh
+printf 'cwd=%s argv=%s\n' "$(pwd)" "$*" >> "$RSYNC_ARGV_OUT"
+exit 0
+SH
+chmod +x "$PMAP/ssh" "$PMAP/rsync"
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+RROOT=/faststorage/project/test/root
+
+# $1 = output file for the rsync argv, rest = hpc_push.sh args. Run from $TMP so
+# the relative sources resolve, with stdout+stderr merged (mapping is stdout, the
+# warning is stderr).
+push_out() {
+    local argv_out="$1"; shift
+    ( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/hpc.env" \
+        "RSYNC_ARGV_OUT=$argv_out" bash "$HERE/hpc_push.sh" "$@" 2>&1 )
+}
+
+nest="$(push_out "$TMP/p1.txt" --dry-run docs/2026-08-24_foo repo)"
+check_contains "push prints the resolved mapping (in --dry-run too)" \
+    "docs/2026-08-24_foo -> selftest-host:$RROOT/repo/2026-08-24_foo" "$nest"
+check_contains "...warns that the directory component is dropped" "WARNING" "$nest"
+check_contains "...names the path the caller probably expected" \
+    "NOT $RROOT/repo/docs/2026-08-24_foo" "$nest"
+check_contains "...offers the <dest> remedy"    "hpc_push.sh docs/2026-08-24_foo repo/docs" "$nest"
+check_contains "...offers the --relative remedy" "hpc_push.sh --relative docs/2026-08-24_foo repo" "$nest"
+
+# <dest> already ending in the source's parent preserves the path: no warning.
+same="$(push_out "$TMP/p2.txt" --dry-run docs/2026-08-24_foo repo/docs)"
+check_contains "maps a matching <dest> to the preserved path" \
+    "-> selftest-host:$RROOT/repo/docs/2026-08-24_foo" "$same"
+check_absent   "...and does not warn (nothing is dropped)" "WARNING" "$same"
+
+# The SKILL.md worked-example shape: <dest> IS the source's parent.
+worked="$(push_out "$TMP/p3.txt" --dry-run conf/params.yaml conf)"
+check_absent "does not warn when <dest> is the source's own parent" "WARNING" "$worked"
+
+# Top-level HPC_PUSH_PATHS ("src scripts") is unaffected by the stripping.
+cfgpush="$(push_out "$TMP/p4.txt" --dry-run)"
+check_contains "config push maps each HPC_PUSH_PATHS entry" \
+    "src -> selftest-host:$RROOT/repo/src" "$cfgpush"
+check_absent   "...and does not warn for top-level entries" "WARNING" "$cfgpush"
+
+# ...but a NESTED HPC_PUSH_PATHS entry has the same footgun, and must warn too.
+cat > "$TMP/nested.env" <<EOF
+HPC_HOST=selftest-host
+HPC_ACCOUNT=test_account
+HPC_REMOTE_ROOT=$RROOT
+HPC_CODE_SUBDIR=repo
+HPC_PUSH_PATHS="src conf/params.yaml"
+HPC_LOCAL_ROOT=$TMP
+HPC_AUDIT_LOG=$TMP/.hpc_audit.log
+EOF
+nestcfg="$( ( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/p5.txt" bash "$HERE/hpc_push.sh" --dry-run 2>&1 ) )"
+check_contains "warns for a NESTED HPC_PUSH_PATHS entry as well" \
+    "conf/params.yaml -> $RROOT/repo/params.yaml" "$nestcfg"
+
+# A trailing slash means "the contents of" — the source's own name lands nowhere.
+slash="$(push_out "$TMP/p6.txt" --dry-run docs/2026-08-24_foo/ repo)"
+check_contains "flags a trailing-slash source as a contents-only push" "contents only" "$slash"
+
+# --relative (opt-in) preserves the path and passes -R through to rsync.
+rel="$(push_out "$TMP/p7.txt" --dry-run --relative docs/2026-08-24_foo repo)"
+check_contains "--relative maps the source's full path under <dest>" \
+    "-> selftest-host:$RROOT/repo/docs/2026-08-24_foo" "$rel"
+check_absent   "...and does not warn"        "WARNING" "$rel"
+check_contains "...and passes -R to rsync"   " -R "     "$(cat "$TMP/p7.txt")"
+check_absent   "default mode passes no -R to rsync" " -R " "$(cat "$TMP/p1.txt")"
+
+# A --relative config push must run rsync FROM HPC_LOCAL_ROOT with relative
+# sources: rsync -R replicates the path as given, so absolute sources would land
+# under a copy of the whole local path. (rsync's /./ anchor would say the same in
+# one path, but openrsync — /usr/bin/rsync on current macOS — ignores it.)
+: > "$TMP/p8.txt"
+( cd / && env "PATH=$PMAP:$PATH" "RSYNC_ARGV_OUT=$TMP/p8.txt" \
+    bash "$HERE/hpc_push.sh" -c "$TMP/nested.env" --relative --dry-run ) >/dev/null 2>&1
+check_contains "--relative config push runs rsync from HPC_LOCAL_ROOT" "cwd=$TMP " "$(cat "$TMP/p8.txt")"
+check_contains "...with sources relative to it"      " conf/params.yaml " "$(cat "$TMP/p8.txt")"
+check_absent   "...not as absolute paths"            "$TMP/conf/params.yaml" "$(cat "$TMP/p8.txt")"
+expect_ok "HPC_PUSH_RELATIVE=1 enables it from hpc.env" \
+    env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" "HPC_PUSH_RELATIVE=1" \
+    "RSYNC_ARGV_OUT=$TMP/p9.txt" bash "$HERE/hpc_push.sh" --dry-run
+
+# Under --relative the source text becomes part of the remote path, so the two
+# ways it could point outside <dest> must be refused rather than mapped.
+expect_fail "--relative refuses an absolute source (would replicate /Users/...)" \
+    env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$TMP/p10.txt" \
+    bash "$HERE/hpc_push.sh" --relative "$TMP/docs/2026-08-24_foo" repo
+esc="$( ( cd "$TMP/src" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/hpc.env" \
+    "RSYNC_ARGV_OUT=$TMP/p11.txt" bash "$HERE/hpc_push.sh" -R ../docs repo 2>&1 ) || true )"
+check_contains "--relative refuses a '..' source (guarded like <dest>)" "'..'" "$esc"
+rm -f "$TMP/.hpc_root_verified"
+
+section "Fetch destination resolution (hpc_fetch.sh)"
+# rsync places a source INSIDE its destination, so the default destination has to
+# be the PARENT of <remote-subpath> for the fetch to land at
+# $HPC_LOCAL_ROOT/<remote-subpath> as documented. Passing $HPC_LOCAL_ROOT/<sub>
+# instead doubled the last component (repo/conf/conf). Checked on the resolved
+# rsync argv, since the transfer itself is stubbed here.
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+# Compare the destination EXACTLY, not by substring: the pre-fix value
+# ($TMP/repo/conf) contains the correct one ($TMP/repo), so a substring check
+# cannot tell them apart and would pass against the very bug under test.
+fetch_dest() {   # $1 = subpath, rest = extra args; echoes the destination rsync got
+    local sub="$1"; shift
+    : > "$TMP/fargv.txt"
+    ( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+        "RSYNC_ARGV_OUT=$TMP/fargv.txt" bash "$HERE/hpc_fetch.sh" "$sub" "$@" ) >/dev/null 2>&1
+    awk 'NR==1{print $NF}' "$TMP/fargv.txt"
+}
+same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
+same "a nested subpath is pulled into its PARENT (no doubled tail)" \
+    "$(fetch_dest repo/conf)"          "$TMP/repo"
+same "a top-level subpath resolves to the local root itself" \
+    "$(fetch_dest results)"            "$TMP/."
+same "a trailing slash keeps <sub> as the destination (contents of)" \
+    "$(fetch_dest 'repo/conf/')"       "$TMP/repo/conf/"
+same "an explicit <local-dest> is still passed verbatim" \
+    "$(fetch_dest repo/conf "$TMP/somewhere")" "$TMP/somewhere"
+# The landing path must be reported, and must be the mirrored path, not the
+# parent that rsync was actually handed.
+fout="$( ( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv2.txt" bash "$HERE/hpc_fetch.sh" repo/conf ) 2>&1 )"
+# Reported landing is the mirrored path; the parent is what rsync was handed
+# (asserted on the argv above). Those two together are the whole property.
+check_contains "fetch prints the resolved landing path" "-> $TMP/repo/conf" "$fout"
+# A single-file fetch needs its destination to pre-exist as a DIRECTORY, or rsync
+# would treat the nonexistent path as a filename (repo/src/mod.py -> a file 'src').
+( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv3.txt" bash "$HERE/hpc_fetch.sh" repo/src/mod.py ) >/dev/null 2>&1
+if [ -d "$TMP/repo/src" ]; then ok "a single-file fetch pre-creates its destination directory"
+else bad "a single-file fetch pre-creates its destination directory"; fi
+rm -rf "$TMP/repo" "$TMP/somewhere"
+# ...but --dry-run says "nothing will be written locally", so it must create
+# nothing either — an empty directory left by a preview makes --dry-run a lie.
+( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv4.txt" bash "$HERE/hpc_fetch.sh" --dry-run repo/conf ) >/dev/null 2>&1
+if [ -e "$TMP/repo" ]; then bad "a --dry-run fetch creates no local directory (found $TMP/repo)"
+else ok "a --dry-run fetch creates no local directory"; fi
+( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv5.txt" bash "$HERE/hpc_fetch.sh" -n repo/conf x/y/dest ) >/dev/null 2>&1
+if [ -e "$TMP/x" ]; then bad "...nor with an explicit <local-dest> (found $TMP/x)"
+else ok "...nor with an explicit <local-dest>"; fi
+rm -rf "$TMP/repo" "$TMP/x"
+rm -f "$TMP/.hpc_root_verified"
+
+section "rsync binary override (HPC_RSYNC)"
+# The wrappers call whatever `rsync` is on PATH, which on macOS 15+ is openrsync
+# (/usr/bin/rsync) rather than a Homebrew GNU rsync. HPC_RSYNC pins one binary.
+# Since hpc.env is shared, the expected way to get this wrong is a path that
+# exists on one laptop only — which must say so, not fail with a bare 127.
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+ALT="$TMP/alt_rsync"                       # deliberately NOT on PATH
+cat > "$ALT" <<'SH'
+#!/bin/sh
+printf 'alt rsync ran: %s\n' "$*" >> "$ALT_RSYNC_LOG"
+exit 0
+SH
+chmod +x "$ALT"
+: > "$TMP/alt.log"
+expect_ok "a push with HPC_RSYNC set to another binary succeeds" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" "HPC_RSYNC=$ALT" "ALT_RSYNC_LOG=$TMP/alt.log" \
+    bash "$HERE/hpc_push.sh"
+check_contains "...and that binary is the one actually invoked" "alt rsync ran:" "$(cat "$TMP/alt.log")"
+
+bogus="$(env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" "HPC_RSYNC=$TMP/no/such/rsync" \
+    bash "$HERE/hpc_push.sh" 2>&1 || true)"
+expect_fail "a push with an HPC_RSYNC that does not exist fails" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" "HPC_RSYNC=$TMP/no/such/rsync" \
+    bash "$HERE/hpc_push.sh"
+check_contains "...with an actionable message, not a bare 127" "does not exist here" "$bogus"
+check_contains "...naming the config it came from" "config:" "$bogus"
+expect_fail "fetch honours it too (same check, same message)" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" "HPC_RSYNC=$TMP/no/such/rsync" \
+    bash "$HERE/hpc_fetch.sh" repo/results
+# Unset must keep working: every other check in this file relies on the PATH stub.
+expect_ok "unset HPC_RSYNC still uses 'rsync' from PATH" \
+    env "PATH=$STUB:$PATH" "HPC_CONFIG=$TMP/hpc.env" bash "$HERE/hpc_push.sh"
 rm -f "$TMP/.hpc_root_verified"
 
 section "Job watcher (hpc_watch.sh)"

@@ -1,0 +1,40 @@
+# genomedk-jobs skill — starter pixi manifest.
+#
+# Copy to `pixi.toml` at your PROJECT root, add your dependencies, then generate
+# the lockfile:
+#
+#     pixi lock                       # writes pixi.lock
+#
+# Commit BOTH pixi.toml and pixi.lock, and list them in HPC_PUSH_PATHS so
+# hpc_push.sh syncs them up. Then install once on the login node (never inside a
+# job — compute nodes have no internet):
+#
+#     ssh $HPC_HOST 'cd <HPC_REMOTE_ROOT>/<HPC_CODE_SUBDIR> && pixi install -e hpc'
+#
+# and run the job with --command "pixi run -e hpc python your_script.py".
+
+# `[workspace]` is the current table name. Older pixi used `[project]`, which
+# still works but prints a deprecation warning on every invocation.
+[workspace]
+name = "my-project"
+version = "0.1.0"
+channels = ["conda-forge"]
+# Include linux-64 (the cluster) AND your laptop's platform, so one lockfile
+# serves both and you can test locally before submitting.
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+python = ">=3.11,<3.13"
+# ...your dependencies here, e.g.:
+# numpy = ">=1.26"
+
+# A GPU build is selected by the lock's platform, so resolve GPU packages on the
+# login node (which has no GPU) with CONDA_OVERRIDE_CUDA:
+#     ssh $HPC_HOST 'cd ... && CONDA_OVERRIDE_CUDA=12.0 pixi install -e hpc'
+# [dependencies]
+# pytorch = { version = ">=2.4", channel = "conda-forge" }
+
+# The `hpc` environment the SKILL.md examples run with. Sharing the default
+# solve-group means it inherits everything under [dependencies] above.
+[environments]
+hpc = { solve-group = "default" }

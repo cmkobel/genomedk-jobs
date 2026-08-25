@@ -4,6 +4,11 @@
 .hpc_root_verified
 .hpc_backups/
 
+# A local hpc.env for testing the skill against a real cluster. Never commit one:
+# it carries someone's host, account, and absolute project paths, and this repo
+# is meant to be shared. config/hpc.env.example is the committed template.
+hpc.env
+
 # Python / OS noise
 __pycache__/
 *.pyc

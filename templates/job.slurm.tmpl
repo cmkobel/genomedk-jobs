@@ -28,6 +28,13 @@ cd "$REMOTE_ROOT/@@REMOTE_SUBDIR@@"
 # probe; some GenomeDK nodes have cgroup cpusets that trip the libomp affinity
 # assertion at startup (torch then crashes at import). Both are no-ops for a
 # plain CPU job that never loads OpenMP, so they are left unconditional.
+#
+# NOTE: one thread pool per job is the assumption here — right for a threaded
+# library (torch, BLAS) using the whole allocation. If your job instead forks
+# its own workers (multiprocessing.Pool, joblib, snakemake -j), this value is
+# per-PROCESS, so N workers x N threads oversubscribes the node and runs far
+# slower. Set OMP_NUM_THREADS=1 in that case — the setup block below runs after
+# this, so `--setup`/HPC_JOB_SETUP can simply override it.
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export KMP_AFFINITY=disabled
 

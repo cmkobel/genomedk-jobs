@@ -445,6 +445,48 @@ esc="$( ( cd "$TMP/src" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/hpc.env" \
 check_contains "--relative refuses a '..' source (guarded like <dest>)" "'..'" "$esc"
 rm -f "$TMP/.hpc_root_verified"
 
+section "Fetch destination resolution (hpc_fetch.sh)"
+# rsync places a source INSIDE its destination, so the default destination has to
+# be the PARENT of <remote-subpath> for the fetch to land at
+# $HPC_LOCAL_ROOT/<remote-subpath> as documented. Passing $HPC_LOCAL_ROOT/<sub>
+# instead doubled the last component (repo/conf/conf). Checked on the resolved
+# rsync argv, since the transfer itself is stubbed here.
+printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"
+# Compare the destination EXACTLY, not by substring: the pre-fix value
+# ($TMP/repo/conf) contains the correct one ($TMP/repo), so a substring check
+# cannot tell them apart and would pass against the very bug under test.
+fetch_dest() {   # $1 = subpath, rest = extra args; echoes the destination rsync got
+    local sub="$1"; shift
+    : > "$TMP/fargv.txt"
+    ( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+        "RSYNC_ARGV_OUT=$TMP/fargv.txt" bash "$HERE/hpc_fetch.sh" "$sub" "$@" ) >/dev/null 2>&1
+    awk 'NR==1{print $NF}' "$TMP/fargv.txt"
+}
+same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
+same "a nested subpath is pulled into its PARENT (no doubled tail)" \
+    "$(fetch_dest repo/conf)"          "$TMP/repo"
+same "a top-level subpath resolves to the local root itself" \
+    "$(fetch_dest results)"            "$TMP/."
+same "a trailing slash keeps <sub> as the destination (contents of)" \
+    "$(fetch_dest 'repo/conf/')"       "$TMP/repo/conf/"
+same "an explicit <local-dest> is still passed verbatim" \
+    "$(fetch_dest repo/conf "$TMP/somewhere")" "$TMP/somewhere"
+# The landing path must be reported, and must be the mirrored path, not the
+# parent that rsync was actually handed.
+fout="$( ( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv2.txt" bash "$HERE/hpc_fetch.sh" repo/conf ) 2>&1 )"
+# Reported landing is the mirrored path; the parent is what rsync was handed
+# (asserted on the argv above). Those two together are the whole property.
+check_contains "fetch prints the resolved landing path" "-> $TMP/repo/conf" "$fout"
+# A single-file fetch needs its destination to pre-exist as a DIRECTORY, or rsync
+# would treat the nonexistent path as a filename (repo/src/mod.py -> a file 'src').
+( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv3.txt" bash "$HERE/hpc_fetch.sh" repo/src/mod.py ) >/dev/null 2>&1
+if [ -d "$TMP/repo/src" ]; then ok "a single-file fetch pre-creates its destination directory"
+else bad "a single-file fetch pre-creates its destination directory"; fi
+rm -rf "$TMP/repo" "$TMP/somewhere"
+rm -f "$TMP/.hpc_root_verified"
+
 section "rsync binary override (HPC_RSYNC)"
 # The wrappers call whatever `rsync` is on PATH, which on macOS 15+ is openrsync
 # (/usr/bin/rsync) rather than a Homebrew GNU rsync. HPC_RSYNC pins one binary.

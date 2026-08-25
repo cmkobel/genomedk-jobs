@@ -56,21 +56,30 @@ if [ "$#" -ge 2 ]; then
     # extra round trip to stat the remote path — so don't claim to know.
     local_dest="$2"
     landing="$2"
-    mkdir -p "$(dirname "$local_dest")"
+    # rsync creates the last component itself; only its parent has to be there.
+    predir="$(dirname "$local_dest")"
 else
     landing="$HPC_LOCAL_ROOT/$sub"
     case "$sub" in
         */) local_dest="$HPC_LOCAL_ROOT/$sub" ;;             # contents of <sub> -> <sub>
         *)  local_dest="$HPC_LOCAL_ROOT/$(dirname "$sub")" ;; # <sub> itself -> its parent
     esac
-    # The destination must exist as a DIRECTORY before the transfer: rsync treats
-    # a nonexistent destination as a filename when the source is a single file,
-    # which would otherwise turn `fetch repo/src/mod.py` into a file named src.
-    mkdir -p "$local_dest"
+    # The destination itself must exist as a DIRECTORY before the transfer: rsync
+    # treats a nonexistent destination as a filename when the source is a single
+    # file, which would otherwise turn `fetch repo/src/mod.py` into a file
+    # named src.
+    predir="$local_dest"
     # Only the resolved default gets a mapping line, since it is the one the
     # caller did not write down and cannot otherwise predict.
     echo "fetch mapping: $HPC_HOST:$remote -> $landing"
 fi
+
+# ...but not during a dry run, which promises to write nothing locally and must
+# keep that promise: creating the destination is still a local write, and an
+# empty directory left behind by a preview is exactly the kind of small lie that
+# makes a --dry-run untrustworthy. rsync -n does not need the destination to
+# exist — it reports the transfer either way.
+if [ "${#DRY[@]}" -eq 0 ]; then mkdir -p "$predir"; fi
 
 rc=0
 # `--` terminates rsync options (see hpc_push.sh) so no path can inject one.

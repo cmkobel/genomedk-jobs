@@ -485,6 +485,17 @@ check_contains "fetch prints the resolved landing path" "-> $TMP/repo/conf" "$fo
 if [ -d "$TMP/repo/src" ]; then ok "a single-file fetch pre-creates its destination directory"
 else bad "a single-file fetch pre-creates its destination directory"; fi
 rm -rf "$TMP/repo" "$TMP/somewhere"
+# ...but --dry-run says "nothing will be written locally", so it must create
+# nothing either — an empty directory left by a preview makes --dry-run a lie.
+( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv4.txt" bash "$HERE/hpc_fetch.sh" --dry-run repo/conf ) >/dev/null 2>&1
+if [ -e "$TMP/repo" ]; then bad "a --dry-run fetch creates no local directory (found $TMP/repo)"
+else ok "a --dry-run fetch creates no local directory"; fi
+( cd "$TMP" && env "PATH=$PMAP:$PATH" "HPC_CONFIG=$TMP/nested.env" \
+    "RSYNC_ARGV_OUT=$TMP/fargv5.txt" bash "$HERE/hpc_fetch.sh" -n repo/conf x/y/dest ) >/dev/null 2>&1
+if [ -e "$TMP/x" ]; then bad "...nor with an explicit <local-dest> (found $TMP/x)"
+else ok "...nor with an explicit <local-dest>"; fi
+rm -rf "$TMP/repo" "$TMP/x"
 rm -f "$TMP/.hpc_root_verified"
 
 section "rsync binary override (HPC_RSYNC)"

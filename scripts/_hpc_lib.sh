@@ -77,7 +77,32 @@ hpc_load_config() {
     : "${HPC_LOCAL_ROOT:=$(cd "$(dirname "$cfg")" && pwd)}"
     : "${HPC_AUDIT_LOG:=$HPC_LOCAL_ROOT/.hpc_audit.log}"
     : "${HPC_CODE_SUBDIR:=repo}"
-    export HPC_HOST HPC_ACCOUNT HPC_REMOTE_ROOT HPC_LOCAL_ROOT HPC_AUDIT_LOG HPC_CODE_SUBDIR HPC_CONFIG
+    : "${HPC_RSYNC:=rsync}"
+    export HPC_HOST HPC_ACCOUNT HPC_REMOTE_ROOT HPC_LOCAL_ROOT HPC_AUDIT_LOG HPC_CODE_SUBDIR HPC_CONFIG HPC_RSYNC
+}
+
+# Every transfer goes through here, so HPC_RSYNC can pin WHICH rsync runs.
+# Default: whatever `rsync` resolves to on PATH. The reason to pin one: macOS 15+
+# ships openrsync as /usr/bin/rsync, a separate implementation that wins over a
+# Homebrew GNU rsync in the usual PATH order. Every option this skill passes
+# (-azP, -n, -R, --backup-dir, the excludes) behaves identically on both, and
+# openrsync rejects an option it does not know rather than ignoring it, so the
+# default needs no help. But the two are not the same program — GNU rsync's '/./'
+# path anchor, for one, is silently ignored by openrsync — so pin the binary
+# rather than debug a divergence:
+#     HPC_RSYNC=/opt/homebrew/bin/rsync    (in hpc.env, or the environment)
+# Checked here rather than in hpc_load_config so a wrong value only breaks the
+# wrappers that actually transfer, and so it fails with an actionable message
+# instead of a bare 127 mid-push. hpc.env is shared, so a path that exists on the
+# author's laptop and nowhere else is the expected way for this to go wrong.
+hpc_rsync() {
+    command -v "$HPC_RSYNC" >/dev/null 2>&1 || hpc_die \
+"HPC_RSYNC is set to a command that does not exist here: $HPC_RSYNC
+   config: ${HPC_CONFIG:-?}
+   It pins which rsync the wrappers run, so a path from another machine (e.g. a
+   Homebrew path in an hpc.env shared with a Linux collaborator) breaks every
+   transfer. Unset it to use whatever 'rsync' is on PATH."
+    "$HPC_RSYNC" "$@"
 }
 
 # Warn (never fail) when HPC_HOST has no SSH connection multiplexing configured.
@@ -171,7 +196,7 @@ hpc_audit() {
 hpc_merge_remote_audit() {
     local remote_audit="$HPC_REMOTE_ROOT/audit.remote.log" tmp line
     tmp="$(mktemp)" || return 0
-    if rsync -az "$HPC_HOST:$remote_audit" "$tmp" 2>/dev/null; then
+    if hpc_rsync -az "$HPC_HOST:$remote_audit" "$tmp" 2>/dev/null; then
         touch "$HPC_AUDIT_LOG"
         while IFS= read -r line; do
             [ -n "$line" ] || continue

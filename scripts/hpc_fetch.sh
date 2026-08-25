@@ -37,7 +37,7 @@ mkdir -p "$(dirname "$local_dest")"
 
 rc=0
 # `--` terminates rsync options (see hpc_push.sh) so no path can inject one.
-rsync -azP ${DRY[@]+"${DRY[@]}"} -- "$HPC_HOST:$remote" "$local_dest" || rc=$?
+hpc_rsync -azP ${DRY[@]+"${DRY[@]}"} -- "$HPC_HOST:$remote" "$local_dest" || rc=$?
 hpc_audit rsync_pull --host "$HPC_HOST" --target "$sub" --dry "${#DRY[@]}" --exit "$rc"
 
 # Bring the SLURM-side audit log down too (independent of the fetch above).

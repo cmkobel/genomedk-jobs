@@ -189,20 +189,71 @@ hook_ec() {
 }
 expect_block() { local d="$1"; if [ "$(hook_ec "$2")" = 2 ]; then ok "$d"; else bad "$d"; fi; }
 expect_allow() { local d="$1"; if [ "$(hook_ec "$2")" = 0 ]; then ok "$d"; else bad "$d"; fi; }
-expect_block "blocks rsync --delete to the host"  "rsync -az --delete ./x selftest-host:/faststorage/project/test/root/"
-expect_block "blocks 'ssh host rm -rf'"           "ssh selftest-host 'rm -rf /faststorage/project/test/root/out'"
-expect_block "blocks 'ssh host find -delete'"     "ssh selftest-host 'find /faststorage/project/test/root -name \"*.ckpt\" -delete'"
-expect_block "blocks 'ssh host shred'"            "ssh selftest-host 'shred -u /faststorage/project/test/root/out'"
-expect_block "blocks 'ssh host truncate -s 0'"    "ssh selftest-host 'truncate -s 0 /faststorage/project/test/root/db'"
+R=/faststorage/project/test/root
+expect_block "blocks rsync --delete to the host"  "rsync -az --delete ./x selftest-host:$R/"
+expect_block "blocks 'ssh host rm -rf'"           "ssh selftest-host 'rm -rf $R/out'"
+expect_block "blocks 'ssh host find -delete'"     "ssh selftest-host 'find $R -name \"*.ckpt\" -delete'"
+expect_block "blocks 'ssh host shred'"            "ssh selftest-host 'shred -u $R/out'"
+expect_block "blocks 'ssh host truncate -s 0'"    "ssh selftest-host 'truncate -s 0 $R/db'"
 expect_block "blocks 'ssh host mkfs'"             "ssh selftest-host mkfs.ext4 /dev/sdb"
+expect_block "blocks '> /etc/...' (system path)"  "ssh selftest-host 'echo x > /etc/passwd'"
+expect_block "blocks '> /dev/sda' (device write)" "ssh selftest-host 'cat z > /dev/sda'"
 expect_allow "allows a wrapper invocation"        "bash scripts/hpc_push.sh"
-expect_allow "allows a normal rsync push"         "rsync -azP ./src selftest-host:/faststorage/project/test/root/repo/"
+expect_allow "allows a normal rsync push"         "rsync -azP ./src selftest-host:$R/repo/"
 expect_allow "allows 'ssh host squeue'"           "ssh selftest-host squeue -u me"
-expect_allow "allows a local rm (not the host)"   "rm -rf /tmp/scratch"
-expect_allow "allows local rsync --delete (no host)" "rsync -a --delete ./a ./b"
 expect_allow "allows a benign '2>/dev/null' redirect" "ssh selftest-host 'squeue -j 1 2>/dev/null'"
-expect_block "blocks '> /etc/...' (system path)"   "ssh selftest-host 'echo x > /etc/passwd'"
-expect_block "blocks '> /dev/sda' (device write)"  "ssh selftest-host 'cat z > /dev/sda'"
+
+# The rules are judged against the REMOTE command only, so a destructive-looking
+# token elsewhere in the same Bash string is not an offence. This is the class the
+# suite used to be blind to: every allow-case above avoids the host token, so a
+# whole-string matcher passed them for the wrong reason (the host gate never
+# fired). Each case below deliberately puts BOTH a cluster reference and a
+# destructive-looking token in one command, with the destruction staying local.
+expect_allow "allows a local rm next to a remote fetch" \
+    "rsync -azP selftest-host:$R/out ./out && rm -rf ./out/tmp"
+expect_allow "...a local rm after any ssh"        "ssh selftest-host true; rm -rf /tmp/scratch"
+expect_allow "...a local chmod -R after a fetch"  "rsync -a selftest-host:$R/x ./x && chmod -R u+w ./x"
+expect_allow "...a local find -delete before a push" \
+    "find ./results -name '*.tmp' -delete && rsync -a ./results selftest-host:$R/keep"
+expect_allow "...local rsync --delete (no endpoint on the host)" "rsync -a --delete ./a ./b"
+expect_allow "...local rsync --delete where a PATH contains the host name" \
+    "rsync -a --delete /tmp/a/ /tmp/selftest-host-backup/"
+expect_allow "...a local rm where a path merely contains the host name" \
+    "rsync -a /tmp/selftest-host-notes/ /tmp/bk && rm -rf /tmp/bk"
+expect_allow "...a destructive verb in a trailing # comment" \
+    "ssh selftest-host squeue -u me  # later: rm -rf ./stale"
+expect_allow "...prose naming the host and the rule, written to a file" \
+    "echo 'never rsync --delete against selftest-host' >> /tmp/notes.md"
+expect_allow "...an alarming FILENAME being transferred" \
+    "rsync -a ./mkfs-notes.md selftest-host:$R/"
+expect_allow "...a file literally named --delete, passed after '--'" \
+    "rsync -azP -- --delete selftest-host:$R/"
+expect_allow "...an rm aimed at a DIFFERENT host"  "ssh other-cluster 'rm -rf /data'"
+expect_allow "...'-rm' as an option cluster, not a command" \
+    "ssh selftest-host 'grep -rm 1 loss $R/train.log'"
+expect_allow "...rmdir (empty directories only)"  "ssh selftest-host 'rmdir $R/empty'"
+
+# Destructive spellings a whole-string regex over the textbook form missed.
+expect_block "blocks a glob rm with no flags"     "ssh selftest-host 'rm $R/*.ckpt'"
+expect_block "...flags after the operand"         "ssh selftest-host 'rm $R -rf'"
+expect_block "...'| xargs rm -rf' at end of string" \
+    "ssh selftest-host \"find $R -name '*.ckpt' | xargs rm -rf\""
+expect_block "...an absolute path to rm"          "ssh selftest-host '/bin/rm -rf $R'"
+expect_block "...rm reached through a variable"   "ssh selftest-host 'D=rm; \$D -rf $R'"
+expect_block "...a quote-obfuscated binary name"  "ssh selftest-host 'r\"\"m -rf $R'"
+expect_block "...an interpreter one-liner"        "ssh selftest-host \"python3 -c 'import shutil;shutil.rmtree(\\\"$R\\\")'\""
+expect_block "...rsync's --del abbreviation"      "rsync -a --del ./src selftest-host:$R/repo/"
+expect_block "...rsync --remove-source-files"     "rsync -a --remove-source-files ./src selftest-host:$R/repo/"
+expect_block "...chmod with -R inside a cluster"  "ssh selftest-host 'chmod -Rv 000 $R'"
+expect_block "...chown --recursive"               "ssh selftest-host 'chown --recursive nobody $R'"
+expect_block "...truncate -s0 (no space)"         "ssh selftest-host 'truncate -s0 $R/db'"
+expect_block "...a fork bomb on the login node"   "ssh selftest-host ':(){ :|:& };:'"
+# The host must be found in the OPERAND position, past options and wrappers.
+expect_block "...with ssh options before the host" \
+    "ssh -o BatchMode=yes -i ~/.ssh/id_ed25519 selftest-host 'rm -rf $R'"
+expect_block "...inside a subshell"               "(ssh selftest-host 'rm -rf $R')"
+expect_block "...behind an env wrapper"           "env LC_ALL=C ssh selftest-host 'rm -rf $R'"
+expect_block "...on the far side of a pipe"       "tar cf - . | ssh selftest-host 'rm -rf $R/old'"
 
 section "Root verification (cached marker)"
 printf 'selftest-host::/faststorage/project/test/root\n' > "$TMP/.hpc_root_verified"

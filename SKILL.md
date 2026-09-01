@@ -24,7 +24,11 @@ The wrappers enforce much of this themselves: every agent-supplied value that re
 
 ## Enforce the safety rules with a hook (recommended)
 
-The wrappers confine writes and never delete — but nothing stops an agent from bypassing them with a raw `ssh <host> 'rm -rf …'` or `rsync --delete`. `scripts/hpc_guard_hook.py` is a Claude Code **PreToolUse** hook that catches the common destructive ones at the harness level. It is narrowly scoped: it only acts on commands that target your configured `HPC_HOST` in a project that has an `hpc.env`, so enabling it globally is a no-op everywhere else. It is a best-effort seatbelt against mistakes, **not a security boundary** — it's a regex pass over the command string, so it can be evaded (obfuscated binary name, the cluster's real hostname instead of the alias, an un-listed verb like `mv`).
+The wrappers confine writes and never delete — but nothing stops an agent from bypassing them with a raw `ssh <host> 'rm -rf …'` or `rsync --delete`. `scripts/hpc_guard_hook.py` is a Claude Code **PreToolUse** hook that catches the common destructive ones at the harness level. It only acts in a project that has an `hpc.env`, so enabling it globally is a no-op everywhere else.
+
+It judges **only the part of a command that reaches the cluster**: it lexes the command into segments and keeps the ones that are an `ssh` with your `HPC_HOST` in the operand position, or an rsync/scp whose endpoint is `<host>:path`. So `rsync <host>:/out ./out && rm -rf ./out/tmp` passes — remote read, local cleanup — and a host name that only appears inside a local path or a `#` comment targets nothing. Everything it *does* judge runs on the cluster, so the rules are broad there: a bare remote `rm` is refused, not only `rm -rf`.
+
+It is a best-effort seatbelt against mistakes, **not a security boundary**. Inherent bypasses: the cluster's real hostname instead of the alias, a script piped in (`ssh <host> bash -s < x.sh`) or queued (`sbatch`), an interactive `ssh -t`, and verbs whose data loss looks like ordinary work (`mv`, a truncating `> results.ckpt`).
 
 Add this to your `settings.json` (`~/.claude/settings.json` for every project, or a project's `.claude/settings.json` for one). `~` is **not** expanded in hook commands, so use `$HOME` (or `$CLAUDE_PROJECT_DIR/.claude/skills/...` for a per-project install):
 

@@ -391,6 +391,17 @@ env "PATH=$ARGV:$PATH" "HPC_CONFIG=$TMP/hpc.env" "RSYNC_ARGV_OUT=$fout" \
     bash "$HERE/hpc_fetch.sh" results ./out >/dev/null 2>&1
 check_contains "fetch terminates rsync options with '--'" \
     '-- selftest-host:/faststorage/project/test/root/results' "$(cat "$fout")"
+# A pull must strip setgid from incoming directory modes. /faststorage project
+# directories are setgid (2755); reproducing that mode locally is refused on
+# macOS ("fchmodat: Operation not permitted"), which failed the fetch with rc 23
+# AFTER transferring every byte. Asserted on the argv because the failure only
+# reproduces against a real setgid source on a foreign-group destination.
+check_contains "fetch strips setgid from incoming directory modes" \
+    '--chmod=Dg-s' "$(cat "$fout")"
+# Scoped to the pull: a push writes into the cluster's own tree, where the
+# setgid bit is how /faststorage keeps group ownership correct.
+check_absent "push does not strip it (remote setgid is load-bearing)" \
+    '--chmod' "$(cat "$pout")"
 rm -f "$TMP/.hpc_root_verified"
 
 section "Push path resolution (basename default vs --relative)"

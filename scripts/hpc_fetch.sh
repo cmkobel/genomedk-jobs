@@ -82,8 +82,19 @@ fi
 if [ "${#DRY[@]}" -eq 0 ]; then mkdir -p "$predir"; fi
 
 rc=0
+# --chmod=Dg-s drops the setgid bit from incoming DIRECTORY modes, and is not
+# cosmetic: GenomeDK's /faststorage project directories are setgid (2755,
+# `drwxr-sr-x`, reapplied by the filesystem if you chmod it away), and -a asks
+# the local side to reproduce that mode. On macOS, setting setgid on a directory
+# whose group you do not own is refused, so the fetch transferred every byte and
+# then died on the destination directory's mode:
+#   rsync: results: fchmodat (1) 1: Operation not permitted   -> rc 23
+# i.e. a complete transfer reported as a hard failure, on every directory fetch.
+# Both implementations need this: GNU rsync's --no-perms would do, but openrsync
+# (/usr/bin/rsync on macOS 15+) accepts that flag and chmods anyway, while
+# --chmod=Dg-s is honoured by both. File modes are still preserved.
 # `--` terminates rsync options (see hpc_push.sh) so no path can inject one.
-hpc_rsync -azP ${DRY[@]+"${DRY[@]}"} -- "$HPC_HOST:$remote" "$local_dest" || rc=$?
+hpc_rsync -azP --chmod=Dg-s ${DRY[@]+"${DRY[@]}"} -- "$HPC_HOST:$remote" "$local_dest" || rc=$?
 hpc_audit rsync_pull --host "$HPC_HOST" --target "$sub" --dry "${#DRY[@]}" --exit "$rc"
 
 # Bring the SLURM-side audit log down too (independent of the fetch above).

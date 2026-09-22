@@ -10,7 +10,7 @@ The authoritative policy is the GenomeDK documentation at <https://genome.au.dk/
 
 3. **GPU jobs must keep the GPU busy.** GenomeDK auto-cancels GPU jobs whose average utilization is below 75% after the first 2 h. If a first run looks borderline, `ssh <host> nvidia-smi` or `ssh <host> jobinfo <jobid>` to check. Right-size `--gpus`/`--cpus`/`--mem` to what the job actually uses.
 
-4. **Stay within the documented per-user limits.** GenomeDK caps a single job at a **7-day** walltime, and a user at **3600 cores** and **12 GPUs** in use at once. `--chunks` chains a long run as sequential array tasks, each within the partition's walltime cap, so the total run can exceed 7 days while no single task does. Do not try to defeat these caps.
+4. **Stay within the documented per-user limits.** GenomeDK caps a single job at a **7-day** walltime, a user at **3600 cores** and **12 GPUs** in use at once, an array at **150,000 tasks**, and a job at **1000 dependencies**. `--chunks` chains a long run as sequential array tasks, each within the partition's walltime cap, so the total run can exceed 7 days while no single task does. Do not try to defeat these caps.
 
 5. **rsync never uses `--delete`.** The wrappers never pass it. Per-task checkpoints and prior outputs on the remote are the resume mechanism for chunked/long runs; deleting them throws away progress. Note that push still *overwrites* a remote file whose local copy differs — preview first with `bash hpc_push.sh --dry-run` (and `hpc_fetch.sh --dry-run`), and set `HPC_PUSH_BACKUP=1` to keep overwritten copies under `$HPC_REMOTE_ROOT/.hpc_backups/<timestamp>`.
 
